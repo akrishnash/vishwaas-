@@ -1,0 +1,12 @@
+ 
+ Order in which shell script to be executed
+ 
+ sh keygen1.sh-------> for keygeneration(only oncee)
+ ls -l
+ sh load_rootkey1.sh ----------->for load key to TPM
+ sh encrypt_openssl.sh  ------------>for encrypt keystore(graph.pikle)
+ sh read_rootkey1.sh ----------> for read key from TPM 
+ ls -l
+ sh decrypt_openssl.sh -------------> for decrypt keystore(graph.pikle)
+ ls -l
+ diff data.txt data.dec

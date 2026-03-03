@@ -1,0 +1,14 @@
+{
+  "node_name": "auto",
+  "master_url": "http://192.168.10.15:8000",
+  "master_token": "86c7396bee69d9e94583bb8a7ae8d05f105d0fa40c35dda9538fa3360f24a99c",
+  "agent_advertise_url": "http://192.168.10.16:9000",
+  "wg_interface": "wg0",
+  "listen_port": 51820,
+  "subnet": "10.10.10.0/24",
+  "keys_dir": "./keys",
+  "agent_bind_host": "0.0.0.0",
+  "agent_port": 9000,
+  "use_tpm_wg_key": true,
+  "tpm_nv_index_wg": 1
+}
