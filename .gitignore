@@ -27,8 +27,13 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+.codex
 
 # Local environment / secrets
 .env
 .env.*
+
+# Agent local config (use agent_config.json.example as template)
+agent/agent_config.json
+agent/keys/
 

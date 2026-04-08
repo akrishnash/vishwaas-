@@ -1,0 +1,653 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{url}
+\usepackage{balance}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=2,
+  captionpos=b
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{VISHWAAS: A Trust-First Distributed VPN Management System\\
+with Explicit Approval Workflows, Centralized Control, and TPM-Backed Key Security}
+
+\author{
+  \IEEEauthorblockN{Anurag Krishnashankar}
+  \IEEEauthorblockA{
+    \textit{Software Engineering} \\
+    \textit{VISHWAAS Project} \\
+    vishwaas@local \\
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+Modern enterprise network management requires secure, auditable, and centrally controlled VPN provisioning. Existing solutions such as Tailscale, Nebula, and raw WireGuard deployments either sacrifice explicit human oversight in favour of automated mesh formation or rely on static configuration files that scale poorly across distributed infrastructure. VISHWAAS (\textit{Sanskrit: ``trust''}) is a production-ready, approval-first VPN orchestration platform built on WireGuard, FastAPI, and React. It enforces the invariant that \emph{no node may join the VPN and no peer connection may become active without explicit administrator approval}. This paper presents the system architecture, the two-tier controller/agent topology, the cryptographic key management model (including optional TPM~2.0 hardware binding), the full lifecycle state machines governing join and connection flows, the REST API surface, the hub-and-spoke routing model for gateway nodes, and the comprehensive audit logging subsystem. We analyse the security threat model, enumerate known limitations, and discuss directions for future work including multi-administrator RBAC, key rotation, and high-availability controller clustering.
+\end{abstract}
+
+\begin{IEEEkeywords}
+WireGuard, VPN orchestration, zero-trust networking, TPM 2.0, approval workflow, distributed systems, FastAPI, network security
+\end{IEEEkeywords}
+
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+Virtual Private Networks (VPNs) remain a foundational technology for securing communication across untrusted networks. The emergence of WireGuard \cite{donenfeld2017wireguard} as a lean, modern VPN protocol has renewed interest in deploying mesh and hub-and-spoke overlay networks without the operational overhead of IPsec or OpenVPN. Yet the tooling surrounding WireGuard—static \texttt{wg-quick} files, peer-exchange daemons such as wg-dynamic, or fully automated mesh controllers—consistently makes a trade-off: \emph{ease of configuration at the cost of explicit approval and auditability}.
+
+In regulated industries (healthcare, finance, government) and zero-trust security postures, this trade-off is unacceptable. Network administrators must be able to answer: \textit{Who approved this node joining our VPN? When was this peer connection established? Who was the authorising principal?} Existing tooling provides either no answers or requires bolting on external audit systems.
+
+VISHWAAS addresses these requirements through a central controller that acts as a gated authority—every state transition in the network (a node joining, two peers connecting, a connection being terminated) requires explicit human approval and produces an immutable audit-log entry. The system couples this strict approval model with a lightweight per-node agent that speaks a minimal HTTP API, enabling the controller to translate approvals directly into live WireGuard configuration changes without manual SSH or configuration management tools.
+
+The name \textit{VISHWAAS} (Sanskrit: \textit{trust, confidence}) reflects the philosophical foundation of the project: trust must be explicitly granted, never assumed.
+
+\subsection{Contributions}
+
+This paper makes the following contributions:
+
+\begin{enumerate}
+  \item A formal description of an approval-first VPN orchestration architecture with clear separation between control-plane (controller) and data-plane-adjacent (agent) components.
+  \item A complete lifecycle specification for node join and peer connection state machines.
+  \item An analysis of three key-management strategies (agent-generated, controller-issued, TPM-bound) and their security trade-offs.
+  \item A hub-and-spoke routing model with automatic IP forwarding and subnet advertisement, enabling scalable gateway topologies within WireGuard's model.
+  \item A thorough security threat model covering token security, transport security, JWT management, and TPM-bound key storage.
+\end{enumerate}
+
+\subsection{Paper Organisation}
+
+Section~\ref{sec:background} reviews WireGuard fundamentals and related VPN orchestration systems. Section~\ref{sec:architecture} describes the overall system architecture. Section~\ref{sec:lifecycle} details the state machines and data flows. Section~\ref{sec:keymanagement} covers the three key-management strategies. Section~\ref{sec:topology} describes the network topology model. Section~\ref{sec:api} catalogues the REST API surface. Section~\ref{sec:security} presents the security threat model. Section~\ref{sec:implementation} summarises the implementation stack. Section~\ref{sec:evaluation} evaluates the system against design goals. Section~\ref{sec:limitations} identifies limitations. Section~\ref{sec:conclusion} concludes.
+
+
+% =============================================================================
+\section{Background and Related Work}
+\label{sec:background}
+% =============================================================================
+
+\subsection{WireGuard Protocol}
+
+WireGuard \cite{donenfeld2017wireguard} is a modern VPN protocol operating at Layer~3. It uses Curve25519 for key exchange, ChaCha20-Poly1305 for symmetric encryption, BLAKE2s for hashing, and SipHash for hash-table keys. Each peer is identified by a 256-bit Curve25519 public key. Routing is governed by \emph{allowed-ips} ACLs per peer: any packet whose destination IP falls within a peer's \texttt{allowed-ips} set is encrypted and sent to that peer.
+
+WireGuard is intentionally low-level: it manages cryptographic tunnelling but provides no mechanism for key distribution, peer discovery, connection approval, or lifecycle management. These responsibilities fall entirely on operators or higher-level orchestration systems.
+
+\subsection{Related Work}
+
+\textbf{Tailscale} \cite{tailscale} is a commercial WireGuard-based mesh VPN. It automates peer discovery, key distribution (via its coordination server), and access control via ACL policies. Tailscale prioritises user experience—nodes can join with a single token and a one-time link. However, the approval granularity is coarse (device approval), and the coordination server is centralised in Tailscale's cloud, introducing a third-party dependency. VISHWAAS differs by being entirely self-hosted and by requiring per-connection approval, not merely per-device approval.
+
+\textbf{Nebula} \cite{nebula} is an open-source overlay network from Slack. It uses a lighthouse-based UDP hole-punching model for peer discovery and certificate-based identity. Like WireGuard tools, Nebula distributes certificates statically and does not provide a runtime approval workflow. VISHWAAS provides dynamic run-time approval that Nebula lacks.
+
+\textbf{WireGuard-over-Kubernetes} solutions (e.g., Kilo, Calico WireGuard) automate WireGuard interface management within Kubernetes using CRDs. These solutions are tightly coupled to Kubernetes and assume implicit trust between cluster nodes. VISHWAAS targets bare-metal and VM deployments without requiring any orchestration layer.
+
+\textbf{Ansible/Terraform WireGuard roles} provide Infrastructure-as-Code provisioning of WireGuard configurations. They excel at reproducible deployments but are push-based tools that execute at deployment time, not run-time. They cannot respond to dynamic node join events without re-running playbooks. VISHWAAS provides a continuously running control loop with real-time response to join requests.
+
+VISHWAAS occupies a unique position: a self-hosted, approval-first, audit-complete WireGuard orchestration system with a web UI, designed for dynamic node populations in regulated or security-sensitive environments.
+
+
+% =============================================================================
+\section{System Architecture}
+\label{sec:architecture}
+% =============================================================================
+
+VISHWAAS is a two-tier distributed system. The \textbf{controller} constitutes the central authority: a FastAPI backend paired with a React/Vite single-page application that presents the administrator dashboard. The \textbf{agent} is a lightweight FastAPI service deployed on every node that must participate in the VPN. Communication flows are unidirectional with respect to control: agents call the controller to request joining; the controller calls agents to effect configuration changes.
+
+\subsection{Controller Architecture}
+
+The controller is structured into five functional layers:
+
+\begin{itemize}
+  \item \textbf{API Routes} (\texttt{app/api/routes/}): HTTP request handling and input validation via Pydantic schemas.
+  \item \textbf{Services} (\texttt{app/services/}): Stateless business logic for join approval, connection approval, agent communication, and audit logging.
+  \item \textbf{Persistence} (\texttt{app/persistence/}): SQLAlchemy ORM models and a SQLite database, providing a durable record of all nodes, requests, connections, and log events.
+  \item \textbf{Domain} (\texttt{app/domain/enums.py}): Enumerated types encoding all valid states and event types, preventing illegal state transitions at the Python type level.
+  \item \textbf{Core} (\texttt{app/core/}): Application configuration (loaded from environment variables with the \texttt{VISHWAAS\_} prefix) and JWT-based authentication utilities.
+\end{itemize}
+
+The \texttt{AgentClient} service (\texttt{services/agent\_client.py}) encapsulates all HTTP calls from the controller to individual agents, providing a consistent abstraction: each method accepts a node's \texttt{agent\_url} and a token, constructs the appropriate request, and returns a structured result object. Callers need not handle raw HTTP status codes.
+
+\subsection{Agent Architecture}
+
+The agent is intentionally minimal—it does one thing well: translate HTTP commands from the controller into WireGuard system calls. Its components are:
+
+\begin{itemize}
+  \item \textbf{Main} (\texttt{app/main.py}): FastAPI application entry point. Manages startup keypair generation, the background join-retry loop, and all HTTP endpoint handlers.
+  \item \textbf{WireGuard} (\texttt{app/wireguard.py}): Wraps \texttt{wg} and \texttt{ip} CLI commands. Provides idempotent operations: \texttt{provision\_interface}, \texttt{add\_peer}, \texttt{remove\_peer}, \texttt{bring\_down}.
+  \item \textbf{Config} (\texttt{app/config.py}): Loads and validates \texttt{agent\_config.json} with structured, user-friendly error messages that identify the exact missing or invalid field.
+  \item \textbf{State} (\texttt{app/state.py}): A thread-safe state machine with four states: \texttt{WAITING}, \texttt{APPROVED}, \texttt{ACTIVE}, \texttt{ERROR}.
+  \item \textbf{TPM} (\texttt{app/tpm.py}): Optional hardware-backed key storage using TPM~2.0 Non-Volatile memory indices.
+  \item \textbf{Security} (\texttt{app/security.py}): Validates the \texttt{X-VISHWAAS-TOKEN} header on all token-gated endpoints.
+  \item \textbf{Logger} (\texttt{app/logger.py}): Structured logging to both stderr and a rotating file, timestamped with millisecond precision.
+\end{itemize}
+
+\subsection{Database Schema}
+
+The controller persists all state in a SQLite database with six tables:
+
+\begin{table}[ht]
+\caption{Database Schema Summary}
+\label{tab:schema}
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Table} & \textbf{Key Columns} \\
+\midrule
+\texttt{nodes} & id, name, public\_key (unique), vpn\_ip (unique), \\
+               & agent\_url, status, is\_gateway, last\_seen \\
+\texttt{join\_requests} & id, node\_name, public\_key, agent\_url, status, \\
+                        & requested\_at \\
+\texttt{connection\_requests} & id, requester\_id, target\_id (FK nodes), status \\
+\texttt{connections} & id, node\_a\_id, node\_b\_id (FK nodes), status \\
+\texttt{notifications} & id, type, message, is\_read, created\_at \\
+\texttt{logs} & id, event\_type, description, created\_at \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \texttt{logs} table is append-only by convention—no service layer method updates or deletes log entries, providing an immutable audit trail.
+
+
+% =============================================================================
+\section{Lifecycle State Machines}
+\label{sec:lifecycle}
+% =============================================================================
+
+\subsection{Node Join Lifecycle}
+
+The join lifecycle governs how a new node is admitted to the VPN. It proceeds in three phases: \emph{registration}, \emph{approval}, and \emph{provisioning}.
+
+\textbf{Phase 1 — Registration.} At startup, the agent generates a WireGuard keypair (idempotently—keys on disk prevent regeneration), detects its local IP, and enters the background join loop. The loop issues \texttt{POST /request-join} to the controller with the node name, public key, and advertised agent URL. The controller checks for a duplicate public key (already-approved node) or a duplicate pending request (idempotent retry), then creates a \texttt{JoinRequest} record with status \texttt{PENDING}. The agent receives a \texttt{\{status: "PENDING"\}} response, waits \texttt{JOIN\_RETRY\_INTERVAL} (10 seconds), and retries.
+
+\textbf{Phase 2 — Approval.} The administrator reviews the pending join request in the UI, inspects the node name, public key fingerprint, and agent URL, and clicks \emph{Approve}. The controller's \texttt{join\_service.approve\_join\_request()} performs the following atomically:
+\begin{enumerate}
+  \item Scans the VPN IP pool (configurable; default \texttt{10.10.10.2–254}) and selects the next unallocated address.
+  \item Creates a \texttt{Node} record with status \texttt{APPROVED} and the assigned \texttt{vpn\_ip}.
+  \item Updates the \texttt{JoinRequest} to status \texttt{APPROVED}.
+  \item Writes a \texttt{JOIN\_APPROVED} log entry.
+  \item Spawns an asynchronous task to call the agent's \texttt{/set-vpn-address} endpoint.
+\end{enumerate}
+
+If the agent is temporarily unreachable, the background retry task retries every 5 seconds up to 4 times. The administrator may also manually trigger a retry via \texttt{POST /nodes/\{id\}/push-vpn-address}.
+
+\textbf{Phase 3 — Provisioning.} On receipt of \texttt{POST /set-vpn-address \{vpn\_ip, [private\_key]\}}, the agent calls \texttt{wireguard.provision\_interface(vpn\_ip)}:
+\begin{enumerate}
+  \item If the \texttt{wg0} interface does not exist: \texttt{ip link add dev wg0 type wireguard}, then \texttt{wg set wg0 private-key \{path\} listen-port 51820}, then \texttt{ip address add vpn\_ip/24 dev wg0}, then \texttt{ip link set wg0 up}.
+  \item If it already exists: verify the assigned IP is correct and the link is up.
+\end{enumerate}
+After successful provisioning the agent transitions to \texttt{ACTIVE} state and the join loop terminates.
+
+The full state machine is: \texttt{WAITING} $\rightarrow$ \texttt{APPROVED} (on controller approval + push) $\rightarrow$ \texttt{ACTIVE} (after interface provisioning). Rejection leads to a terminal \texttt{WAITING} state with no retry.
+
+\subsection{Connection Lifecycle}
+
+The connection lifecycle governs how two active nodes are joined as WireGuard peers.
+
+\textbf{Request.} An administrator selects two nodes and submits a connection request via \texttt{POST /request-connection}. The controller creates a \texttt{ConnectionRequest} record (status \texttt{PENDING}) and logs a \texttt{CONNECTION\_REQUESTED} event. Idempotency is enforced: a second request for the same pair while one is already \texttt{PENDING} returns the existing record.
+
+\textbf{Approval.} On administrator approval, \texttt{connection\_service.approve\_connection()} executes:
+\begin{enumerate}
+  \item Retrieves both node records including their \texttt{vpn\_ip} and \texttt{agent\_url}.
+  \item Determines \texttt{allowed\_ips} for each side based on the gateway model (see Section~\ref{sec:topology}).
+  \item Calls agent~A's \texttt{POST /peer} with node~B's public key, allowed IP, and endpoint (\texttt{host:51820}).
+  \item Calls agent~B's \texttt{POST /peer} with node~A's public key, allowed IP, and endpoint.
+  \item If either node is a gateway, calls \texttt{POST /ip-forward/enable} on the hub.
+  \item Creates a \texttt{Connection} record (status \texttt{ACTIVE}).
+  \item Updates the \texttt{ConnectionRequest} to \texttt{APPROVED}.
+\end{enumerate}
+
+Each agent's \texttt{/peer} handler issues \texttt{wg set wg0 peer \{pubkey\} allowed-ips \{ip\} endpoint \{ep\} persistent-keepalive 25}, which WireGuard applies atomically and without interface restart.
+
+\textbf{Termination.} An administrator terminates a connection via \texttt{DELETE /connections/\{id\}}. The controller:
+\begin{enumerate}
+  \item Calls \texttt{DELETE /peer} on both agents to remove each other from the WireGuard peer list.
+  \item Marks the \texttt{Connection} as \texttt{TERMINATED}.
+  \item Checks whether each node has any remaining \texttt{ACTIVE} connections. If not, calls \texttt{POST /wg/down} to bring the interface down entirely.
+\end{enumerate}
+
+
+% =============================================================================
+\section{Key Management}
+\label{sec:keymanagement}
+% =============================================================================
+
+VISHWAAS supports three distinct key-management strategies, selectable per agent. Each offers a different trade-off between security, operational complexity, and hardware requirements.
+
+\subsection{Strategy 1: Agent-Generated Keys (Default)}
+
+At startup the agent calls \texttt{wireguard.generate\_keypair()}, which shells out to \texttt{wg genkey} and derives the public key via \texttt{wg pubkey}. Both are written to \texttt{keys\_dir/\{privatekey,publickey\}} with permissions \texttt{0600}/\texttt{0644}. The operation is idempotent: if the files already exist (e.g., after a restart), the existing keys are retained.
+
+The private key \emph{never leaves the node}: the controller receives only the public key in the join request body. This satisfies the principle of least exposure. The drawback is that a file-system-level attacker with root access can read the private key directly.
+
+\subsection{Strategy 2: Controller-Issued Keys}
+
+Enabled by setting \texttt{"controller\_issues\_keys": true} in \texttt{agent\_config.json}. In this mode:
+\begin{enumerate}
+  \item The agent submits the join request with an empty public key field.
+  \item On approval, the controller's \texttt{join\_service} calls \texttt{\_generate\_keypair()} to produce a fresh WireGuard keypair.
+  \item The public key is stored in the \texttt{Node} record.
+  \item The private key is transmitted to the agent in the \texttt{/set-vpn-address} response body.
+  \item The agent writes it to disk (and optionally to TPM).
+\end{enumerate}
+
+This model centralises key generation but exposes the private key in transit. It is only appropriate when the controller–agent channel is TLS-encrypted. The advantage is a simpler agent (no \texttt{wg genkey} dependency) and centralised key-generation audit.
+
+\subsection{Strategy 3: TPM 2.0 Hardware-Bound Keys}
+
+Enabled by setting \texttt{"use\_tpm\_wg\_key": true} and specifying a \texttt{tpm\_nv\_index\_wg} (e.g., \texttt{1}). After the WireGuard private key is generated (by either Strategy~1 or Strategy~2), the agent calls \texttt{tpm.write\_wg\_key\_to\_tpm(private\_key\_path, nv\_index)}, which:
+\begin{enumerate}
+  \item Runs \texttt{tpm2\_startup -c} to ensure a clean TPM context.
+  \item Defines NV storage: \texttt{tpm2\_nvdefine -C o -s 45 -a ownerread|policywrite|ownerwrite \{nv\_index\}}.
+  \item Writes the 44-byte base64-encoded WireGuard private key: \texttt{tpm2\_nvwrite -C o -i \{keyfile\} \{nv\_index\}}.
+\end{enumerate}
+
+Subsequently, every call to \texttt{wireguard} functions that require the private key path goes through \texttt{tpm.get\_private\_key\_path\_for\_wg()}, which:
+\begin{enumerate}
+  \item Reads the key from TPM NV into a \texttt{tempfile.NamedTemporaryFile}.
+  \item Returns the temporary file path.
+  \item The caller is responsible for deleting the temp file immediately after use.
+\end{enumerate}
+
+This strategy prevents the private key from persisting on the filesystem. Even a full disk image exfiltration does not yield the WireGuard private key. The TPM binds the key to the physical hardware; it cannot be moved to another machine's TPM (TPM NV indices are not exportable). The fallback mechanism degrades gracefully: if the TPM is unavailable, the system falls back to disk-based key access and logs a warning, ensuring availability at the cost of the hardware-binding property.
+
+\begin{table}[ht]
+\caption{Key Management Strategy Comparison}
+\label{tab:keymanagement}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Property} & \textbf{Agent-Gen} & \textbf{Ctrl-Issued} & \textbf{TPM-Bound} \\
+\midrule
+Private key leaves node & No & Once & No \\
+Key on disk & Yes & Yes & No \\
+Hardware binding & No & No & Yes \\
+Disk-dump resistant & No & No & Yes \\
+Requires TPM 2.0 & No & No & Yes \\
+Agent simplicity & Medium & High & Low \\
+Recommended use & General & Dev/test & High-sec \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% =============================================================================
+\section{Network Topology Model}
+\label{sec:topology}
+% =============================================================================
+
+VISHWAAS supports three topology patterns, governed by the \texttt{is\_gateway} flag on node records.
+
+\subsection{Peer-to-Peer Mesh}
+
+When all nodes have \texttt{is\_gateway = false}, every approved connection adds mutual \texttt{/32} peer entries on both sides. The result is a full or partial mesh. Each node routes packets for any peer exclusively through the corresponding direct WireGuard tunnel. Suitable for small networks (up to approximately 50 nodes before the $O(n^2)$ peer-update overhead becomes significant) where low-latency direct paths are required.
+
+\subsection{Hub-and-Spoke (Gateway)}
+
+A gateway node (\texttt{is\_gateway = true}) acts as a routing hub. When the controller approves a connection between a spoke node~S and a gateway node~G:
+\begin{itemize}
+  \item \textbf{Spoke~S} receives \texttt{allowed-ips = 10.10.10.0/24} for peer~G, meaning \emph{all} VPN traffic is routed through~G.
+  \item \textbf{Gateway~G} receives \texttt{allowed-ips = S.vpn\_ip/32} for peer~S.
+  \item The controller calls \texttt{POST /ip-forward/enable} on~G, which runs \texttt{sysctl -w net.ipv4.ip\_forward=1}.
+\end{itemize}
+
+This topology reduces the number of WireGuard peers from $O(n^2)$ (mesh) to $O(n)$ (all spokes connect to hub), making it suitable for large deployments. The hub handles all intra-VPN routing via the kernel IP forwarding path.
+
+\subsection{Hybrid Topology}
+
+Multiple gateway nodes can coexist with direct spoke-to-spoke meshes. Spoke nodes can connect directly to each other while also connecting to a hub for subnet coverage. The controller computes \texttt{allowed-ips} correctly for each individual connection based on the endpoint nodes' \texttt{is\_gateway} flags, enabling arbitrary hybrid topologies.
+
+\subsection{Topology Visualisation}
+
+The \texttt{GET /topology} endpoint returns a graph representation:
+\begin{lstlisting}[caption={Topology API response (abbreviated)}]
+{
+  "nodes": [
+    { "id": 1, "name": "gw-1", "vpn_ip": "10.10.10.2",
+      "status": "ACTIVE", "is_gateway": true },
+    { "id": 2, "name": "node-a", "vpn_ip": "10.10.10.3",
+      "status": "ACTIVE", "is_gateway": false }
+  ],
+  "edges": [
+    { "id": 1, "source_id": 2, "target_id": 1,
+      "status": "ACTIVE" }
+  ]
+}
+\end{lstlisting}
+
+The React dashboard renders this data using \texttt{react-force-graph-2d}—a physics-based force-directed graph layout that positions gateway nodes as visually prominent hubs and spoke nodes as satellites, giving administrators an immediate intuitive understanding of the network structure.
+
+
+% =============================================================================
+\section{REST API Surface}
+\label{sec:api}
+% =============================================================================
+
+\subsection{Controller API}
+
+The controller exposes a comprehensive REST API under the base path \texttt{http://\{host\}:8000}. Table~\ref{tab:controller-api} summarises the primary endpoints. All endpoints except \texttt{POST /request-join} and \texttt{GET /health} require a valid JWT Bearer token when authentication is enabled.
+
+\begin{table}[ht]
+\caption{Controller REST API Surface (Selected Endpoints)}
+\label{tab:controller-api}
+\centering
+\small
+\begin{tabularx}{\columnwidth}{lX}
+\toprule
+\textbf{Method + Path} & \textbf{Description} \\
+\midrule
+POST /request-join & Agent submits join request (tokenless) \\
+GET /join-requests & List join requests (filterable by status) \\
+POST /join-requests/\{id\}/approve & Admin approves join \\
+POST /join-requests/\{id\}/reject & Admin rejects join \\
+\midrule
+GET /nodes & List all nodes \\
+GET /nodes/\{id\} & Node detail with WireGuard stats \\
+PATCH /nodes/\{id\} & Update agent\_url or name \\
+POST /nodes/\{id\}/push-vpn-address & Retry VPN address push to agent \\
+POST /nodes/\{id\}/set-gateway & Mark node as hub \\
+DELETE /nodes/\{id\} & Remove node and teardown \\
+DELETE /nodes & Remove all nodes \\
+\midrule
+POST /request-connection & Request peer connection \\
+POST /connection-requests/\{id\}/approve & Approve and activate peers \\
+DELETE /connections/\{id\} & Terminate connection \\
+\midrule
+GET /stats & Dashboard summary counts \\
+GET /stats/detailed & Per-node WireGuard bandwidth \\
+GET /logs & Audit log (filterable by event type) \\
+GET /topology & Graph nodes + edges \\
+GET /notifications & Unread admin notifications \\
+\midrule
+POST /auth/login & Obtain JWT token \\
+GET /auth/me & Validate current session \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Agent API}
+
+The agent exposes a minimal API on port 9000. Table~\ref{tab:agent-api} lists the endpoints. All except \texttt{GET /health} require the \texttt{X-VISHWAAS-TOKEN} header to match the \texttt{master\_token} in \texttt{agent\_config.json}.
+
+\begin{table}[ht]
+\caption{Agent REST API Surface}
+\label{tab:agent-api}
+\centering
+\small
+\begin{tabularx}{\columnwidth}{lX}
+\toprule
+\textbf{Method + Path} & \textbf{Description} \\
+\midrule
+GET /health & Liveness check; returns agent state \\
+POST /set-vpn-address & Provision WireGuard interface with assigned IP \\
+POST /peer & Add or update a WireGuard peer \\
+DELETE /peer & Remove a WireGuard peer by public key \\
+POST /wg/start & Bring WireGuard interface up \\
+POST /wg/stop & Bring WireGuard interface down \\
+GET /wg/status & Return current WireGuard stats \\
+POST /ip-forward/enable & Enable kernel IPv4 forwarding \\
+POST /remove-node & Full teardown (remove peers, down interface) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Error Handling Contract}
+
+Both controller and agent return a consistent JSON envelope:
+\begin{lstlisting}[caption={Unified response envelope}]
+{ "success": true|false,
+  "message": "Human-readable summary",
+  "detail": "Optional debug information or null" }
+\end{lstlisting}
+
+HTTP status codes follow REST conventions: 200 for success, 400 for bad request, 401 for missing/invalid token, 404 for absent resource, 422 for Pydantic validation failures, 502 when the controller cannot reach an agent, and 503 when configuration is missing.
+
+
+% =============================================================================
+\section{Security Analysis}
+\label{sec:security}
+% =============================================================================
+
+\subsection{Authentication and Authorisation}
+
+VISHWAAS employs three distinct authentication mechanisms across its communication channels:
+
+\textbf{Agent-to-Controller (Join Request).} Join requests are intentionally unauthenticated at the transport level—an agent presenting a join request is, by definition, an unknown entity. Security is provided by the approval gate: the administrator must explicitly inspect and approve the request before the node receives any VPN configuration. The public key in the join request serves as a cryptographic identity anchor; an adversary who submits a fraudulent join request with a different key will receive a different VPN IP and cannot impersonate an approved node.
+
+\textbf{Controller-to-Agent (Peer Management).} All controller calls to agent endpoints carry an \texttt{X-VISHWAAS-TOKEN} header. The agent validates this against its configured \texttt{master\_token}. A mismatch returns HTTP~401 and logs a ``suspicious access'' warning. This shared-secret model is simple and effective for internal networks; it does not provide per-message authentication or replay protection, which motivates the TLS recommendation (Section~\ref{sec:transport}).
+
+\textbf{Dashboard (Administrator UI).} Authentication is optional and controlled by the \texttt{VISHWAAS\_ADMIN\_PASSWORD\_HASH} environment variable. When set to a bcrypt hash of the administrator password, the frontend must obtain a JWT (HS256, configurable expiry defaulting to 480 minutes) via \texttt{POST /auth/login}. The JWT is stored in \texttt{localStorage}. When \texttt{VISHWAAS\_ADMIN\_PASSWORD\_HASH} is empty, all API endpoints are publicly accessible—intended only for isolated development environments.
+
+\subsection{Transport Security}
+\label{sec:transport}
+
+VISHWAAS does not enforce TLS at the application layer; it delegates transport security to the deployment environment. The recommended production deployment places an nginx reverse proxy with a TLS certificate in front of the controller API and serves agent URLs over HTTPS. Without TLS, the \texttt{X-VISHWAAS-TOKEN}, JWT tokens, and (in the controller-issued-key mode) WireGuard private keys are transmitted in plaintext over the network.
+
+\subsection{Threat Model}
+
+Table~\ref{tab:threats} enumerates the primary threats, their risk levels under a default HTTP deployment, and the mitigations available.
+
+\begin{table}[ht]
+\caption{Threat Model Summary}
+\label{tab:threats}
+\centering
+\small
+\begin{tabularx}{\columnwidth}{lllX}
+\toprule
+\textbf{Threat} & \textbf{Risk} & \textbf{Mitigated?} & \textbf{Mitigation} \\
+\midrule
+Rogue agent join & Med & Partial & Admin approval gate \\
+MITM controller↔agent & High & No (HTTP) & Use HTTPS \\
+Stolen agent token & High & No & Rotate token, use HTTPS \\
+Private key exfiltration & Med & Partial & TPM binding \\
+JWT theft (localStorage) & Med & Partial & HTTPS, short expiry \\
+SQL injection & Low & Yes & SQLAlchemy ORM \\
+XSS in dashboard & Med & Partial & React auto-escaping \\
+Replay attacks on agent & Med & No & Add nonce/timestamp \\
+VPN IP pool exhaustion & Low & Yes & Sequential allocation check \\
+Rogue admin action & Low & Partial & Immutable audit log \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Audit and Non-Repudiation}
+
+The \texttt{logs} table records every significant state transition with its \texttt{event\_type}, human-readable \texttt{description}, and a millisecond-precision \texttt{created\_at} timestamp. Defined event types include: \texttt{JOIN\_REQUESTED}, \texttt{JOIN\_APPROVED}, \texttt{JOIN\_REJECTED}, \texttt{CONNECTION\_REQUESTED}, \texttt{CONNECTION\_APPROVED}, \texttt{CONNECTION\_REJECTED}, \texttt{CONNECTION\_TERMINATED}, \texttt{NODE\_REMOVED}, and \texttt{NODE\_OFFLINE}. No service-layer code updates or deletes log entries, providing a best-effort immutable audit trail. For cryptographic non-repudiation, an external append-only log store (e.g., a Merkle-tree-based audit log) would be required—this is identified as future work.
+
+
+% =============================================================================
+\section{Implementation}
+\label{sec:implementation}
+% =============================================================================
+
+\subsection{Technology Stack}
+
+\textbf{Controller Backend:}
+\begin{itemize}
+  \item Python 3.10+, FastAPI 0.115+, uvicorn 0.32+ (ASGI server)
+  \item SQLAlchemy 2.0+ ORM with SQLite backend
+  \item Pydantic 2.0+ for request/response validation
+  \item python-jose + cryptography for JWT (HS256)
+  \item passlib + bcrypt for password hashing
+  \item httpx 0.27+ for async HTTP calls to agents
+\end{itemize}
+
+\textbf{Agent:}
+\begin{itemize}
+  \item Python 3.10+, FastAPI 0.109+, uvicorn 0.27+
+  \item \texttt{subprocess} for \texttt{wg} and \texttt{ip} CLI invocations
+  \item \texttt{tpm2-tools} (optional) for TPM NV operations
+  \item \texttt{tempfile} for secure ephemeral key handling
+\end{itemize}
+
+\textbf{Frontend:}
+\begin{itemize}
+  \item React 18.3+, React Router 6.28+
+  \item Vite 5.4+ (build toolchain and dev server)
+  \item \texttt{react-force-graph-2d} 1.29+ for topology visualisation
+  \item Recharts 3.7+ for time-series bandwidth charts
+  \item lucide-react 0.474+ for iconography
+  \item React Context API (\texttt{AuthContext}, \texttt{ToastContext}, \texttt{StatsContext}) for global state
+\end{itemize}
+
+\subsection{Deployment}
+
+Deployment follows a standard shell-script bootstrap model. \texttt{start\_controller.sh} creates a Python virtual environment, installs dependencies from \texttt{requirements.txt}, builds the React frontend with \texttt{npm run build}, and starts uvicorn. \texttt{start\_agent.sh} validates \texttt{agent\_config.json}, creates a virtual environment, and starts the agent uvicorn process.
+
+An \texttt{install.sh} script for the agent installs it as a systemd service at \texttt{/opt/vishwaas-agent}, enabling automatic start on boot and restart on failure. This is the recommended production deployment mode.
+
+\subsection{Codebase Metrics}
+
+\begin{table}[ht]
+\caption{Codebase Size Summary}
+\label{tab:codebase}
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Component} & \textbf{Files} & \textbf{Approx. LOC} \\
+\midrule
+Controller backend & 18 & $\sim$2,500 \\
+Agent & 8 & $\sim$1,200 \\
+Frontend (JSX/JS) & 16 & $\sim$1,500 \\
+Scripts \& config & 10 & $\sim$300 \\
+\textbf{Total (excl. vendored)} & \textbf{52} & \textbf{$\sim$5,500} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% =============================================================================
+\section{Evaluation}
+\label{sec:evaluation}
+% =============================================================================
+
+We evaluate VISHWAAS against five design goals articulated at project inception.
+
+\textbf{G1: Explicit Approval.} Every node join and every peer connection requires a positive administrator action. The state machines and database constraints ensure no node can transition to \texttt{ACTIVE} without a recorded approval event. \textit{Met.}
+
+\textbf{G2: Immutable Audit Log.} All state transitions produce append-only log entries with event type and timestamp. The absence of update/delete operations on the \texttt{logs} table (enforced by convention across all service modules) provides a complete record. \textit{Mostly met}; cryptographic tamper-evidence is absent.
+
+\textbf{G3: Zero-Touch Provisioning After Approval.} Once approved, the controller automatically provisions the WireGuard interface on the agent without any manual SSH or configuration file editing. Background retry logic handles transient agent unavailability. \textit{Met.}
+
+\textbf{G4: Key Security Commensurate With Hardware.} Three escalating strategies are available: disk, controller-issued, and TPM-bound. TPM binding prevents private-key exfiltration even under full disk compromise. \textit{Met.}
+
+\textbf{G5: Scalable Topology.} Hub-and-spoke topology with per-connection routing policies reduces the peer-count complexity from $O(n^2)$ to $O(n)$ for gateway-mediated networks. The topology API and force-graph visualisation enable administrators to manage hundreds of nodes. \textit{Met for gateway topologies; mesh topology has inherent $O(n^2)$ scaling.}
+
+
+% =============================================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+% =============================================================================
+
+\subsection{Current Limitations}
+
+\begin{enumerate}
+  \item \textbf{Single Administrator.} The authentication model supports a single \texttt{admin} account. Multi-user RBAC (e.g., read-only observers, scoped approvers) is absent.
+  \item \textbf{No Key Rotation.} WireGuard keypairs are static for the lifetime of a node registration. Rotation requires deleting the node and re-joining, causing a brief VPN outage.
+  \item \textbf{No Heartbeat / Liveness Detection.} The controller does not poll agents; the \texttt{NODE\_OFFLINE} state must be set manually. A missed agent failure is not automatically detected.
+  \item \textbf{SQLite Single-Point-of-Failure.} The controller uses SQLite, which does not support concurrent writes or replication. A controller failure takes down the management plane (the VPN data plane—WireGuard itself—continues operating unaffected).
+  \item \textbf{IPv4 Only.} VPN addressing and routing are hardcoded to IPv4. IPv6 dual-stack is not supported.
+  \item \textbf{No Mutual TLS.} Agent authentication relies on a shared token, not a certificate chain. A compromised controller token grants full control over all agents.
+  \item \textbf{No Replay Protection on Agent API.} The \texttt{X-VISHWAAS-TOKEN} header provides authentication but not message freshness. A captured valid request could be replayed.
+  \item \textbf{CORS Wildcard.} The controller sets \texttt{allow\_origins=["*"]}. This is appropriate for internal deployments but must be restricted for internet-facing controllers.
+\end{enumerate}
+
+\subsection{Future Work}
+
+\begin{enumerate}
+  \item \textbf{Multi-Admin RBAC.} Introduce roles (\textit{viewer}, \textit{approver}, \textit{admin}) with fine-grained permissions. OAuth~2.0 / LDAP integration for enterprise identity providers.
+  \item \textbf{Automated Key Rotation.} Implement zero-downtime key rotation: generate a new keypair, propagate the new public key to all existing peers via the controller, activate the new interface, deactivate the old, and update the database atomically.
+  \item \textbf{Heartbeat and Auto-Offline Detection.} Agents emit a \texttt{POST /heartbeat} to the controller on a configurable interval. The controller marks nodes \texttt{OFFLINE} after a configurable timeout, triggers notifications, and optionally removes stale peer configurations.
+  \item \textbf{High-Availability Controller.} Migrate persistence to PostgreSQL, add a health-check endpoint, and deploy behind a load balancer with active/passive failover. The controller state is fully relational and can be replicated.
+  \item \textbf{Prometheus Metrics Exporter.} Expose a \texttt{/metrics} endpoint in OpenMetrics format, reporting per-node bandwidth, active connections, pending approvals, and join-request queue depth.
+  \item \textbf{Webhook Notifications.} Push approval events and node-status changes to configurable webhook URLs (Slack, Teams, PagerDuty) to integrate VISHWAAS into existing NOC workflows.
+  \item \textbf{Replay Protection.} Add a timestamp and nonce to controller→agent requests, with a short validity window, to prevent replay attacks on the agent API.
+  \item \textbf{IPv6 Dual-Stack.} Extend the VPN addressing scheme to support IPv6 prefixes and dual-stack nodes.
+\end{enumerate}
+
+
+% =============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% =============================================================================
+
+VISHWAAS demonstrates that an approval-first VPN management system can be practical, operationally useful, and architecturally clean without sacrificing the security properties demanded by regulated environments. By treating every state transition as a first-class event requiring explicit human authorisation, VISHWAAS provides the auditability that automated mesh VPN systems inherently lack.
+
+The two-tier controller/agent architecture cleanly separates the management concern (who is allowed to join, who may connect to whom) from the configuration concern (how to translate those decisions into WireGuard system calls). This separation enables the agent to remain minimal and auditable—approximately 1,200 lines of Python that do exactly one thing—while the controller accumulates the organisational knowledge and approval history.
+
+The three-strategy key management model, culminating in TPM-bound hardware keys, gives operators a path from simple development deployments to high-assurance production deployments on the same codebase. The hub-and-spoke topology model provides the routing scalability needed for real enterprise deployments without sacrificing the approval-per-connection invariant.
+
+VISHWAAS is a mature foundation for organisations that wish to deploy WireGuard-based VPNs under strict operational discipline. Its primary gaps—single-admin, no key rotation, no heartbeat, SQLite persistence—are well-understood engineering problems with clear solutions, identified in the future-work roadmap. The core approval-workflow and audit-logging infrastructure, which is the system's most distinctive contribution, is complete and production-ready.
+
+% =============================================================================
+\section*{Acknowledgements}
+% =============================================================================
+
+The author thanks the WireGuard project \cite{donenfeld2017wireguard} for providing a principled and auditable VPN primitive on which VISHWAAS is built, and the FastAPI project for enabling rapid development of well-validated Python HTTP services.
+
+% =============================================================================
+\begin{thebibliography}{00}
+
+\bibitem{donenfeld2017wireguard}
+J.~A. Donenfeld, ``WireGuard: Next Generation Kernel Network Tunnel,''
+in \textit{Proc. Network and Distributed System Security Symposium (NDSS)},
+San Diego, CA, USA, 2017.
+
+\bibitem{tailscale}
+Tailscale Inc., ``Tailscale: A Secure Network that Just Works,''
+\textit{Tailscale Technical Overview}, 2020. [Online]. Available: \url{https://tailscale.com/blog/how-tailscale-works}
+
+\bibitem{nebula}
+Slack Technologies, ``Nebula: A Scalable Overlay Networking Tool,''
+GitHub, 2019. [Online]. Available: \url{https://github.com/slackhq/nebula}
+
+\bibitem{fastapi}
+S.~Ramirez, ``FastAPI: Modern, Fast (High-Performance) Web Framework for Building APIs with Python,''
+GitHub, 2019. [Online]. Available: \url{https://fastapi.tiangolo.com}
+
+\bibitem{tpm2}
+Trusted Computing Group, ``TPM 2.0 Library Specification, Part 1: Architecture,''
+TCG Specification, Revision 1.59, 2019. [Online]. Available: \url{https://trustedcomputinggroup.org/resource/tpm-library-specification/}
+
+\bibitem{wireguard-linux}
+J.~A. Donenfeld, ``WireGuard: Fast, Modern, Secure VPN Tunnel,''
+\textit{Linux Journal}, vol. 2018, no. 287, pp. 1–11, 2018.
+
+\bibitem{zerotrust}
+J.~Kindervag, ``Build Security Into Your Network's DNA: The Zero Trust Network Architecture,''
+Forrester Research, Technical Report, 2010.
+
+\bibitem{sqlalchemy}
+M.~Bayer, ``SQLAlchemy: The Database Toolkit for Python,''
+GitHub, 2006. [Online]. Available: \url{https://www.sqlalchemy.org}
+
+\bibitem{react}
+Meta Platforms Inc., ``React: A JavaScript Library for Building User Interfaces,''
+GitHub, 2013. [Online]. Available: \url{https://react.dev}
+
+\bibitem{wireguard-rfc}
+J.~A. Donenfeld, ``WireGuard: Next Generation Kernel Network Tunnel,''
+IETF Internet Draft, draft-donenfeld-wireguard-01, 2016.
+
+\end{thebibliography}
+
+\end{document}

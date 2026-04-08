@@ -1,5 +1,0 @@
-# VISHWAAS Agent - Python dependencies
-# Python 3.10+
-
-fastapi>=0.109.0,<1.0.0
-uvicorn[standard]>=0.27.0,<1.0.0

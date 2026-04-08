@@ -1,135 +1,214 @@
-## VISHWAAS – Controller + Agent VPN
+# VISHWAAS
 
-**VISHWAAS** is a simple but robust WireGuard-based VPN with an explicit **request / approve** flow:
+> A WireGuard VPN system with an explicit agent join/connect workflow that is centrally approved by a controller.
 
-- **Agents** run on your machines and ask to join the VPN.
-- A central **Controller** lets you approve nodes and connections in a clean web UI.
-- No node becomes ACTIVE and no connection is created without an approval step.
+## 🧠 What This Project Does (Plain English)
+VISHWAAS helps you build a private VPN between multiple Linux machines without manually editing WireGuard config on every device. Each machine runs an “agent” that requests access to join the VPN. A central “controller” provides a dashboard where an administrator approves join requests and approves connections between machines. After approval, the controller pushes the required configuration to the agent(s), which brings up and manages the WireGuard interface. The result is a controlled, auditable VPN setup where “nothing becomes active” without explicit approval.
 
-This repo contains both halves of the system, organized into separate folders for clarity.
+## 🤖 LLM/Agent Quick-Orientation
 
----
+- **Project type**: API service + dashboard + distributed node agents
+- **Primary language & runtime**: Python (controller + agent, FastAPI/uvicorn) and JavaScript/TypeScript (frontend dashboard)
+- **Core framework(s)**: FastAPI, SQLAlchemy, pydantic-settings, httpx, React + Vite
+- **LLM(s) used**: None ([FILL IN] if you later add an LLM-based assistant)
+- **Entry point**:
+  - Controller: `controller/run_controller.sh` (runs `controller/backend/app/main.py` via uvicorn and `controller/frontend`)
+  - Agent: `agent/run_agent.sh` (runs `agent/app/main.py` via uvicorn)
+- **Key design pattern**: “Approval gate” workflow with strict state transitions (PENDING -> APPROVED -> ACTIVE, and REQUESTED -> APPROVED -> ACTIVE)
+- **State management**:
+  - Controller persistent state stored in SQLite (nodes, connection requests, audit logs)
+  - Agent runtime state stored in memory (plus WireGuard/TPM key state on the node)
+- **External dependencies**:
+  - WireGuard tooling (`wireguard-tools`, `ip`, and related commands)
+  - Optional: TPM tooling (`tpm2-tools`) when `use_tpm_wg_key=true`
+  - Optional: SSH for deployment scripts (`deploy-agent-to-clone.sh`)
 
-### High-level flow
+## 🏗️ Architecture Overview
 
-- **Join**: An agent starts and sends a *join request* (node name, agent URL, and optionally its WireGuard public key) to the controller.
-- **Approve node**: In the controller UI you approve the request, assign a VPN IP, and the controller pushes config back to the agent.
-- **Connect nodes**: To link two machines, you request a connection between them and approve; the controller updates both agents’ WireGuard peers.
-- **Retry handling**: If an agent is offline when you approve, the controller retries delivering config in the background.
+### Diagram (Mermaid)
+```mermaid
+graph TD
+    A[Agent startup<br/>agent/run_agent.sh] -->|HTTP POST /request-join| B[Controller Backend<br/>FastAPI join.py]
+    A --> C[Agent local state machine<br/>state.py]
+    B --> D[(SQLite DB<br/>persistence/models.py)]
+    U[Admin UI<br/>React dashboard] -->|Approve Join / Approve Connection| B
 
-See `DESIGN.md` for a deeper design walkthrough, including key-handling variants and TPM notes.
+    B -->|HTTP + header X-VISHWAAS-TOKEN<br/>/peer or /wg/add-peer| E[Agent API<br/>FastAPI app.main.py]
+    E --> F[WireGuard configuration<br/>wireguard.py]
+    F --> C
 
----
+    B -->|HTTP + header X-VISHWAAS-TOKEN<br/>/peer updates| E
+    E --> G[WireGuard interface + keys on node]
+```
 
-### Repository layout
+### Component Table
+| Component | Role | File/Module | Notes |
+|----------|------|--------------|-------|
+| Controller API | Exposes REST endpoints for join/connection approval | `controller/backend/app/api/routes/*.py` | Routes: `join.py`, `nodes.py`, `connections.py`, `monitoring.py` |
+| Controller Services | Implements approval logic and agent callbacks | `controller/backend/app/services/*.py` | Key modules: `join_service.py`, `connection_service.py`, `agent_client.py` |
+| Controller Persistence | Stores nodes/requests/logs in SQLite | `controller/backend/app/persistence/*.py` | Key modules: `database.py`, `models.py` |
+| Domain Enums | Defines strict state transitions | `controller/backend/app/domain/*.py` | Key module: `enums.py` |
+| Controller Core Config | Loads controller settings from env | `controller/backend/app/core/config.py` | Key var: `VISHWAAS_AGENT_TOKEN` -> `agent_token` |
+| Frontend Dashboard | UI to approve joins/connections and view status | `controller/frontend/src/...` | UI pages drive controller REST API calls |
+| Agent Config Loader | Loads + validates `agent_config.json` | `agent/app/config.py` | Adds clear errors: “Please enter correct details in agent_config.json” |
+| Agent API | Handles join loop and receives controller peer updates | `agent/app/main.py` | Starts join process; exposes controller-compatible endpoints |
+| Agent Security | Token checks for controller->agent calls | `agent/app/security.py` | Join requests are tokenless; peer changes require token |
+| Agent WireGuard Manager | Creates keys and brings up/down WireGuard | `agent/app/wireguard.py` | Interface name and keys directory come from config |
+| Agent TPM Support (optional) | Stores/reads private keys in TPM NV index | `agent/app/tpm.py` | Enabled via `use_tpm_wg_key` |
+| Agent Run/Install Scripts | Local developer run and systemd deployment | `agent/run_agent.sh`, `agent/install.sh` | Run validates config before starting |
+
+## 📁 Project Structure
+
+The repository is split into two deployable units. On a machine that is the controller, deploy `controller/`. On a node that should join the VPN, deploy `agent/`.
 
 ```text
 vishwaas/
-├── controller/                 # Control plane (API + web UI)
-│   ├── backend -> ../backend   # FastAPI backend (symlink)
-│   ├── frontend -> ../frontend # React/Vite frontend (symlink)
-│   └── run_controller.sh -> ../run_controller.sh
+├── controller/                     # Control plane: API + dashboard
+│   ├── backend/                    # FastAPI backend (controller)
+│   │   └── app/
+│   │       ├── api/routes/
+│   │       ├── core/config.py
+│   │       ├── services/
+│   │       ├── persistence/
+│   │       └── domain/
+│   ├── frontend/                   # React/Vite dashboard
+│   ├── run_controller.sh          # Starts backend + frontend and logs
+│   ├── capture_log.sh             # Archives controller and agent logs (best-effort)
+│   └── logs/                      # Runtime logs for controller runs
 │
-├── agent/                      # Node agent
-│   └── vishwaas-agent -> ../vishwaas-agent
+├── agent/                          # Node software: registers + configures WireGuard
+│   ├── app/                        # Agent implementation
+│   │   ├── main.py                # Startup/join loop and HTTP endpoints
+│   │   ├── config.py              # agent_config.json loader + validation
+│   │   ├── security.py            # token checks for controller callbacks
+│   │   ├── wireguard.py           # WireGuard operations
+│   │   └── tpm.py                 # optional TPM integration
+│   ├── run_agent.sh                # Validates config, then starts uvicorn on :9000
+│   ├── install.sh                  # Installs as systemd service
+│   ├── uninstall.sh                # Uninstalls service and app folder
+│   ├── deploy-agent-to-clone.sh   # Deploy the agent folder to a remote node
+│   ├── agent_config.json.example  # Template config (no secrets)
+│   └── tpm_scripts/               # Helper scripts for TPM provisioning (best-effort)
 │
-├── backend/                    # Actual backend source (FastAPI)
-├── frontend/                   # Actual frontend source (React/Vite)
-├── vishwaas-agent/             # Actual agent implementation (Python)
-├── run_controller.sh           # Helper script: start backend + frontend together
-├── README_VISHWAAS_MASTER.md   # Controller-focused documentation
-├── RUN.md                      # End-to-end “how to run controller + agent”
-├── DESIGN.md                   # VPN flow and key-management design
-└── tpm_scripts/                # TPM helpers for secure key storage on agents
+├── DESIGN.md                       # Join/approval/key-management design
+├── RUN.md                          # Practical run instructions (high level)
+└── .gitignore
 ```
 
-You can work either from the grouped folders (`controller/`, `agent/`) or directly in `backend/`, `frontend/`, and `vishwaas-agent/`.
+## Setup & Prerequisites
 
----
+### Controller machine requirements
+- Linux machine reachable by agents (IP:8000 on the controller)
+- Python + build tools (used to install backend deps)
+- Node.js + npm (used to install frontend deps)
+- Environment variable `VISHWAAS_AGENT_TOKEN` set in `controller/backend/.env`
 
-### Quick start – run everything locally
+### Agent machine requirements
+- Linux (Ubuntu-based recommended)
+- WireGuard installed: `sudo apt install wireguard-tools`
+- Root access for installation and to manage WireGuard interface
+- Agent config file: `agent/agent_config.json` created from the example
+- Optional TPM: TPM 2.0 device and `tpm2-tools` if `use_tpm_wg_key=true`
 
-#### 1. Start the controller (API + UI)
+## Configuration
 
-From the repo root:
+### Controller configuration (`controller/backend/.env`)
+The backend loads settings from `.env` using prefix `VISHWAAS_`.
 
+- `VISHWAAS_AGENT_TOKEN` (required for controller->agent callbacks)
+
+Debug behavior: if this token is missing/empty, the controller logs a warning at startup and cannot push peer updates reliably.
+
+### Agent configuration (`agent/agent_config.json`)
+The agent expects a JSON object with (at minimum):
+- `master_url`: Controller base URL (e.g. `http://192.168.10.15:8000`)
+- `master_token`: Shared token that must match controller `VISHWAAS_AGENT_TOKEN`
+- `agent_advertise_url`: URL controller uses to reach this agent (e.g. `http://192.168.10.16:9000`)
+
+The agent also supports:
+- `node_name`: `"auto"` or a string
+- `wg_interface`: WireGuard interface name (default `wg0`)
+- `listen_port`: WireGuard listen port (default `51820`)
+- `subnet`: VPN subnet (default `10.10.10.0/24`)
+- `keys_dir`: where keys are stored (default `./keys`)
+- `use_tpm_wg_key`: optional TPM-based key storage
+- `tpm_nv_index_wg`: TPM NV index (default `1`)
+
+## Running the System
+
+### Run controller (developer mode)
 ```bash
+cd controller
 ./run_controller.sh
 ```
 
-This script will:
+Expected services:
+- Backend API: `http://0.0.0.0:8000`
+- Dashboard UI: `http://localhost:3000`
+- Logs: `controller/logs/backend.log` and `controller/logs/frontend.log`
 
-- Create and reuse a Python virtualenv in `backend/.venv`.
-- Start the FastAPI backend on `http://0.0.0.0:8000`.
-- Install frontend dependencies and start Vite on `http://localhost:3000`.
-- Stream logs into `logs/backend.log` and `logs/frontend.log`.
-
-You can also run the pieces by hand; see `README_VISHWAAS_MASTER.md` for details.
-
-#### 2. Start an agent (same machine or another box)
-
-From the repo root:
-
+### Run agent
 ```bash
-cd vishwaas-agent
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-
-# Edit agent_config.json:
-# - master_url   → controller URL, e.g. http://127.0.0.1:8000
-# - master_token → must match backend VISHWAAS_AGENT_TOKEN
-# - agent_advertise_url → how the controller calls this agent
-
-venv/bin/python -c "from app.main import run; run()"
+cd agent
+sudo ./run_agent.sh
 ```
 
-The agent will send a join request to the controller. Open the controller UI at `http://localhost:3000`, go to **Join Requests**, and click **Approve**.
+Expected service:
+- Agent API on `:9000` (controller can reach it via `agent_advertise_url`)
 
-For installing the agent as a systemd service or deploying to another machine, see `vishwaas-agent/README.md` and `vishwaas-agent/RUN_AGENT.md`.
+## Joining the VPN (Operational Flow)
 
----
+1. Agent starts and sends a join request to the controller: `POST /request-join`
+2. In the controller UI:
+   - Approve the join request (controller assigns a VPN IP and pushes config)
+3. Agent applies WireGuard configuration and brings up the interface.
+4. To connect two nodes:
+   - Create a connection request and approve it
+   - Controller adds each node as a peer on the other.
 
-### Controller vs agent responsibilities
+Key point: No node becomes ACTIVE and no connection is created without approval.
 
-- **Controller (this machine, central brain)**
-  - Exposes REST API for join and connection workflows.
-  - Persists nodes, connections, and logs (SQLite by default).
-  - Hosts the dashboard UI (React/Vite).
-  - Pushes WireGuard configuration to agents after approvals.
+## Debugging & Validation Messages
 
-- **Agent (each VPN node)**
-  - Registers itself with the controller.
-  - Brings up and manages the WireGuard interface (`wg0` by default).
-  - Applies configuration pushed by the controller (VPN IP, peers).
-  - Can optionally keep its private key in a TPM-backed NV index.
+### Agent config errors
+If `agent/agent_config.json` is missing or invalid, `agent/run_agent.sh` exits early with:
+- `ERROR: agent_config.json not found...` OR
+- `ERROR: agent_config.json is not valid JSON...` OR
+- `ERROR: Please enter correct details in agent_config.json:` followed by a list of specific issues.
 
----
+This is intentionally designed so both developers and non-technical operators can quickly correct the config.
 
-### Security notes
+### Controller missing token
+If `VISHWAAS_AGENT_TOKEN` is missing/empty, controller backend logs a warning. Peer updates from the controller to the agent will fail or be unauthorized.
 
-- No “auto-join” or “auto-connect”: everything is approval-based.
-- Strict node / connection state machines in the controller backend.
-- Every action is logged for auditability.
-- Agents can be configured to store WireGuard private keys in a TPM 2.0 NV index (`use_tpm_wg_key` in `agent_config.json`) for hardware-bound key protection.
-
-For the full architecture and API reference, start with:
-
-- `README_VISHWAAS_MASTER.md` – controller internals, API endpoints, and dashboard features.
-- `DESIGN.md` – VPN/key flow and security model at a higher level.
-
----
-
-### GitHub remote
-
-This project is wired to the remote repository at `https://github.com/akrishnash/vishwaas-.git`.  
-To publish your local work:
-
+### Capture logs
+To archive logs from a controller run (and agent logs when present):
 ```bash
-git add .
-git commit -m "Initial VISHWAAS controller + agent"
-git branch -M main           # optional: use 'main' as default branch
-git push -u origin main
+cd controller
+./capture_log.sh
 ```
 
-You now have a clean, two-part layout (controller and agent) with a single repo that describes and runs the whole system.
+It creates a timestamped tarball under `controller/logs/`.
 
+## Security Model
+
+1. **Central authority**: only the controller approves joins and connection creation.
+2. **Token-gated peer management**:
+   - Join requests from agents are tokenless (controller gates approve/reject).
+   - Controller->agent endpoints require `X-VISHWAAS-TOKEN`.
+3. **Private keys**:
+   - Agents generate keys locally by default.
+   - Optional: agents can store the WireGuard private key in TPM NV storage when `use_tpm_wg_key=true`.
+
+## Extensibility Notes
+- The controller backend uses a service layer (approval logic) separated from API routes, making it easy to add new approval steps and audit events.
+- The agent’s key storage approach is configurable:
+  - agent-generated keys (default)
+  - controller-issued keys (`controller_issues_keys=true`) [FILL IN: docs/implementation details]
+  - TPM-bound storage (`use_tpm_wg_key=true`)
+
+## [FILL IN] Known Limitations
+- [FILL IN]
+
+## [FILL IN] License
+- [FILL IN]

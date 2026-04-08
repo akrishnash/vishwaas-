@@ -1,0 +1,14 @@
+{
+  "node_name": "auto",
+  "master_url": "http://CONTROLLER_IP:8000",
+  "master_token": "YOUR_SHARED_TOKEN_SAME_AS_CONTROLLER_VISHWAAS_AGENT_TOKEN",
+  "agent_advertise_url": "http://THIS_MACHINE_IP:9000",
+  "wg_interface": "wg0",
+  "listen_port": 51820,
+  "subnet": "10.10.10.0/24",
+  "keys_dir": "./keys",
+  "agent_bind_host": "0.0.0.0",
+  "agent_port": 9000,
+  "use_tpm_wg_key": false,
+  "tpm_nv_index_wg": 1
+}
