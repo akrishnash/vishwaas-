@@ -32,7 +32,9 @@ _STATS_SEMAPHORE = asyncio.Semaphore(20)
 @router.get("/stats", response_model=StatsSchema)
 def get_stats(db: Session = Depends(get_db)):
     """Dashboard overview counts."""
-    total_nodes = db.query(Node).count()
+    total_nodes = db.query(Node).filter(
+        Node.status.in_((NodeStatus.ACTIVE, NodeStatus.APPROVED))
+    ).count()
     active_nodes = db.query(Node).filter(
         Node.status.in_((NodeStatus.ACTIVE, NodeStatus.APPROVED))
     ).count()
