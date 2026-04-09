@@ -156,7 +156,7 @@ def _run_wg(args: list[str], input_text: str | None = None) -> tuple[bool, str, 
 
 
 def _interface_exists(iface: str) -> bool:
-    """Return True if the WireGuard interface exists."""
+    """Return True if the WireGuard interface exists (may be DOWN)."""
     result = subprocess.run(
         ["ip", "link", "show", iface],
         capture_output=True,
@@ -166,9 +166,33 @@ def _interface_exists(iface: str) -> bool:
     return result.returncode == 0
 
 
+def _interface_is_up(iface: str) -> bool:
+    """Return True if the interface exists AND the UP flag is set in its link flags."""
+    result = subprocess.run(
+        ["ip", "link", "show", iface],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        return False
+    # First line: "wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> ..."  or  "<POINTOPOINT,NOARP>"
+    line = result.stdout.split("\n")[0] if result.stdout else ""
+    start, end = line.find("<"), line.find(">")
+    if start == -1 or end == -1:
+        return False
+    flags = set(line[start + 1 : end].split(","))
+    return "UP" in flags
+
+
 def interface_exists() -> bool:
-    """Return True if the configured WireGuard interface exists (node is provisioned)."""
+    """Return True if the configured WireGuard interface exists (node is provisioned; may be DOWN)."""
     return _interface_exists(get_wg_interface())
+
+
+def interface_is_up() -> bool:
+    """Return True if the configured WireGuard interface exists AND is administratively UP."""
+    return _interface_is_up(get_wg_interface())
 
 
 def wg_show_peers(iface: str) -> list[str]:

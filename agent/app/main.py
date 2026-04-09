@@ -48,15 +48,6 @@ JOIN_RETRY_INTERVAL = 10
 _join_decided = False
 
 
-def _already_active() -> bool:
-    """Return True if this node is already provisioned (vpn_ip file exists and wg interface is up).
-    Used on startup to skip re-joining when the agent is simply restarted."""
-    vpn_ip = wireguard.get_assigned_vpn_ip()
-    if not vpn_ip:
-        return False
-    return wireguard.interface_exists()
-
-
 def _detect_local_ip() -> str:
     """Detect local IP for agent_url (prefer non-loopback)."""
     try:
@@ -223,7 +214,7 @@ def health() -> dict[str, Any]:
     """
     state_val = get_state().value
     iface = wireguard.get_wg_interface() if hasattr(wireguard, "get_wg_interface") else "wg0"
-    iface_up = wireguard.interface_exists()
+    iface_up = wireguard.interface_is_up()
     vpn_ip = wireguard.get_assigned_vpn_ip()
 
     peer_count = 0
