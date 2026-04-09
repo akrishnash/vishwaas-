@@ -2,13 +2,16 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { usePolling } from '../hooks/usePolling';
 import { api } from '../api/client';
-import { ZoomIn, ZoomOut, Maximize2, ArrowDownLeft, ArrowUpRight, Clock } from 'lucide-react';
+import {
+  ZoomIn, ZoomOut, Maximize2, ArrowDownLeft, ArrowUpRight,
+  Clock, ChevronDown, ChevronRight, Wifi, WifiOff, Server,
+} from 'lucide-react';
 
 const STATUS_COLOR = {
-  ACTIVE: '#3fb950',
-  PENDING: '#d29922',
-  OFFLINE: '#6e7681',
+  ACTIVE:   '#3fb950',
   APPROVED: '#58a6ff',
+  PENDING:  '#d29922',
+  OFFLINE:  '#6e7681',
 };
 
 function fmt(b) {
@@ -24,54 +27,152 @@ function fmtHs(s) {
   return `${Math.floor(s / 3600)}h ago`;
 }
 
-function paintNode(node, ctx) {
-  const r = 20;
+// Compact node painter — small circle with status ring
+function paintNode(node, ctx, globalScale) {
+  const r = 10;
   const color = STATUS_COLOR[node.status] || '#6e7681';
   const selected = node.__selected;
 
-  // Glow ring for selected
+  // Selection ring
   if (selected) {
     ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 7, 0, 2 * Math.PI);
-    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-    ctx.lineWidth = 1.5;
+    ctx.arc(node.x, node.y, r + 5, 0, 2 * Math.PI);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
     ctx.stroke();
   }
 
-  // Outer glow for active
+  // Active glow
   if (node.status === 'ACTIVE') {
     ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI);
-    ctx.fillStyle = color + '20';
+    ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+    ctx.fillStyle = color + '18';
     ctx.fill();
   }
 
-  // Fill
+  // Node fill
   ctx.beginPath();
   ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-  ctx.fillStyle = color + '22';
+  ctx.fillStyle = color + '28';
   ctx.fill();
 
-  // Border
+  // Node border
   ctx.beginPath();
   ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
   ctx.strokeStyle = color;
-  ctx.lineWidth = selected ? 2.5 : 2;
+  ctx.lineWidth = selected ? 2 : 1.5;
   ctx.stroke();
 
-  // Name
-  ctx.font = `700 11px system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#e6edf3';
-  const name = node.name.length > 9 ? node.name.slice(0, 8) + '…' : node.name;
-  ctx.fillText(name, node.x, node.y);
+  // Name label (only draw when zoomed enough)
+  if (globalScale > 0.6) {
+    const label = node.name.length > 10 ? node.name.slice(0, 9) + '…' : node.name;
+    ctx.font = `600 ${9 / globalScale}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e6edf3';
+    ctx.fillText(label, node.x, node.y);
+  }
 
-  // IP below
-  ctx.font = '9px system-ui, sans-serif';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = 'rgba(255,255,255,0.4)';
-  ctx.fillText(node.vpn_ip || '', node.x, node.y + r + 5);
+  // IP below node
+  if (globalScale > 0.8 && node.vpn_ip) {
+    ctx.font = `${7 / globalScale}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText(node.vpn_ip, node.x, node.y + r + 3 / globalScale);
+  }
+}
+
+// Expandable node card for the side panel
+function NodeCard({ node, detail, isExpanded, onToggle, isSelected, onSelect }) {
+  const color = STATUS_COLOR[node.status] || '#6e7681';
+  const isOnline = node.status === 'ACTIVE' || node.status === 'APPROVED';
+
+  return (
+    <div
+      className={`topo-node-card${isSelected ? ' topo-node-card--selected' : ''}`}
+      style={{ borderLeftColor: color }}
+    >
+      {/* Header row — always visible */}
+      <div
+        className="topo-node-card-header"
+        onClick={() => { onSelect(node); onToggle(node.id); }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
+          {isOnline
+            ? <Wifi size={13} color={color} style={{ flexShrink: 0 }} />
+            : <WifiOff size={13} color={color} style={{ flexShrink: 0 }} />
+          }
+          <span className="topo-node-name">{node.name}</span>
+          {node.is_gateway && (
+            <span className="tag" style={{ fontSize: '0.6rem', padding: '0.1rem 0.4rem', color: '#a371f7', borderColor: '#a371f740', background: '#a371f710' }}>
+              GW
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+          <span className="topo-node-ip">{node.vpn_ip || '—'}</span>
+          {isExpanded
+            ? <ChevronDown size={13} color="var(--text-muted)" />
+            : <ChevronRight size={13} color="var(--text-muted)" />
+          }
+        </div>
+      </div>
+
+      {/* Expanded detail */}
+      {isExpanded && (
+        <div className="topo-node-card-body">
+          <div className="topo-kv-row">
+            <span>Status</span>
+            <span style={{ color, fontWeight: 600 }}>{node.status}</span>
+          </div>
+
+          {detail ? (
+            <>
+              <div className="topo-kv-row">
+                <span><ArrowDownLeft size={10} style={{ verticalAlign: 'middle' }} /> RX</span>
+                <span style={{ color: 'var(--info)', fontWeight: 600 }}>{fmt(detail.total_rx)}</span>
+              </div>
+              <div className="topo-kv-row">
+                <span><ArrowUpRight size={10} style={{ verticalAlign: 'middle' }} /> TX</span>
+                <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{fmt(detail.total_tx)}</span>
+              </div>
+              <div className="topo-kv-row">
+                <span>Reachable</span>
+                <span style={{ color: detail.reachable ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
+                  {detail.reachable ? 'Yes' : 'No'}
+                </span>
+              </div>
+
+              {detail.peers?.length > 0 && (
+                <div style={{ marginTop: '0.6rem' }}>
+                  <div className="topo-subsection-label">Peers ({detail.peers.length})</div>
+                  {detail.peers.map((p, i) => (
+                    <div key={i} className="topo-peer-row">
+                      <div className="topo-peer-ip">
+                        {p.allowed_ips || (p.public_key?.slice(0, 16) + '…')}
+                      </div>
+                      <div className="topo-peer-stats">
+                        <span><ArrowDownLeft size={9} /> {fmt(p.transfer_rx)}</span>
+                        <span><ArrowUpRight size={9} /> {fmt(p.transfer_tx)}</span>
+                        {p.latest_handshake_ago != null && (
+                          <span><Clock size={9} /> {fmtHs(p.latest_handshake_ago)}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', paddingTop: '0.25rem' }}>
+              No live stats
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function Topology() {
@@ -79,7 +180,8 @@ export function Topology() {
   const [detailed, setDetailed] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selected, setSelected] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
+  const [expandedIds, setExpandedIds] = useState(new Set());
   const containerRef = useRef(null);
   const graphRef = useRef(null);
   const [size, setSize] = useState({ width: 600, height: 500 });
@@ -87,12 +189,14 @@ export function Topology() {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const obs = new ResizeObserver(() => setSize({ width: el.offsetWidth, height: el.offsetHeight }));
+    const obs = new ResizeObserver(() =>
+      setSize({ width: el.offsetWidth, height: el.offsetHeight })
+    );
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
 
-  const fetch = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
       setError(null);
       const [t, d] = await Promise.all([
@@ -108,49 +212,109 @@ export function Topology() {
     }
   }, []);
 
-  usePolling(fetch, 5000);
+  usePolling(fetchData, 5000);
 
   const graphData = useMemo(() => ({
     nodes: topology.nodes.map(n => ({
       id: n.id, name: n.name, vpn_ip: n.vpn_ip, status: n.status,
-      __selected: selected?.id === n.id,
+      is_gateway: n.is_gateway, __selected: selectedId === n.id,
     })),
     links: topology.edges.map(e => ({
       id: e.id, source: e.source_id, target: e.target_id, status: e.status,
     })),
-  }), [topology, selected]);
+  }), [topology, selectedId]);
 
-  const selectedDetail = useMemo(() => {
-    if (!selected || !detailed) return null;
-    return detailed.nodes.find(n => n.node_id === selected.id) ?? null;
-  }, [selected, detailed]);
+  const detailByNodeId = useMemo(() => {
+    if (!detailed?.nodes) return {};
+    return Object.fromEntries(detailed.nodes.map(n => [n.node_id, n]));
+  }, [detailed]);
 
   const handleNodeClick = useCallback(node => {
-    setSelected(prev => prev?.id === node.id ? null : node);
+    const id = node.id;
+    setSelectedId(prev => prev === id ? null : id);
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleCardSelect = useCallback(node => {
+    setSelectedId(prev => prev === node.id ? null : node.id);
+    // zoom graph to node
+    if (graphRef.current) {
+      const gNode = graphData.nodes.find(n => n.id === node.id);
+      if (gNode?.x != null) {
+        graphRef.current.centerAt(gNode.x, gNode.y, 600);
+        graphRef.current.zoom(2, 600);
+      }
+    }
+  }, [graphData]);
+
+  const handleCardToggle = useCallback(id => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
   if (loading && !topology.nodes.length) {
-    return <div className="content"><div className="spinner" style={{ margin: '3rem auto', display: 'block' }} /></div>;
+    return (
+      <div className="content">
+        <div className="spinner" style={{ margin: '3rem auto', display: 'block' }} />
+      </div>
+    );
   }
 
+  const activeNodes = topology.nodes.filter(n => n.status === 'ACTIVE').length;
+  const activeLinks = topology.edges.filter(e => e.status === 'ACTIVE').length;
+
   return (
-    <div className="content" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.5rem' }}>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Network Topology</h1>
-          <div className="page-sub">Force-directed graph · click a node to inspect</div>
+    <div className="content" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.25rem' }}>
+      <div className="page-header" style={{ marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h1 className="page-title">Network Topology</h1>
+            <div className="page-sub">
+              {topology.nodes.length} node{topology.nodes.length !== 1 ? 's' : ''} · {activeNodes} active · {activeLinks} connection{activeLinks !== 1 ? 's' : ''}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            {Object.entries(STATUS_COLOR).map(([s, c]) => (
+              <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <svg width={10} height={10}>
+                  <circle cx={5} cy={5} r={4} fill={c + '25'} stroke={c} strokeWidth={1.5} />
+                </svg>
+                <span>{s}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginLeft: '0.25rem' }}>
+              <svg width={22} height={4}>
+                <line x1={0} y1={2} x2={22} y2={2} stroke="#3fb950" strokeWidth={2} />
+              </svg>
+              <span>Link</span>
+            </div>
+          </div>
         </div>
       </div>
 
-      {error && <div className="card" style={{ marginBottom: '1rem', borderColor: 'var(--danger)', color: 'var(--danger)' }}>{error}</div>}
+      {error && (
+        <div className="card" style={{ marginBottom: '0.75rem', borderColor: 'var(--danger)', color: 'var(--danger)', padding: '0.75rem 1rem', fontSize: '0.85rem' }}>
+          {error}
+        </div>
+      )}
 
-      <div className="topo-layout">
-        {/* Graph */}
+      <div className="topo-layout" style={{ flex: 1, minHeight: 0 }}>
+        {/* Graph canvas */}
         <div className="topo-graph" ref={containerRef}>
           {topology.nodes.length === 0 ? (
             <div className="empty-state">
-              <div style={{ fontWeight: 600 }}>No nodes yet</div>
-              <div style={{ fontSize: '0.85rem' }}>Approve join requests to add nodes to the graph.</div>
+              <Server size={32} color="var(--text-muted)" />
+              <div style={{ fontWeight: 600, marginTop: '0.5rem' }}>No nodes yet</div>
+              <div style={{ fontSize: '0.82rem' }}>Approve join requests to add nodes.</div>
             </div>
           ) : (
             <ForceGraph2D
@@ -164,19 +328,21 @@ export function Topology() {
               nodePointerAreaPaint={(node, color, ctx) => {
                 ctx.fillStyle = color;
                 ctx.beginPath();
-                ctx.arc(node.x, node.y, 24, 0, 2 * Math.PI);
+                ctx.arc(node.x, node.y, 16, 0, 2 * Math.PI);
                 ctx.fill();
               }}
-              nodeLabel={node => `${node.name} · ${node.vpn_ip}`}
+              nodeLabel={node => `${node.name}${node.vpn_ip ? ' · ' + node.vpn_ip : ''} · ${node.status}`}
               onNodeClick={handleNodeClick}
-              onBackgroundClick={() => setSelected(null)}
+              onBackgroundClick={() => setSelectedId(null)}
               linkColor={link => link.status === 'ACTIVE' ? '#3fb950' : '#373e47'}
-              linkWidth={link => link.status === 'ACTIVE' ? 2 : 1}
-              linkDirectionalParticles={link => link.status === 'ACTIVE' ? 4 : 0}
+              linkWidth={link => link.status === 'ACTIVE' ? 1.5 : 1}
+              linkDirectionalParticles={link => link.status === 'ACTIVE' ? 3 : 0}
               linkDirectionalParticleSpeed={0.004}
               linkDirectionalParticleColor={() => '#3fb950'}
-              linkDirectionalParticleWidth={2}
-              cooldownTicks={120}
+              linkDirectionalParticleWidth={1.5}
+              d3AlphaDecay={0.02}
+              d3VelocityDecay={0.3}
+              cooldownTicks={150}
               enableNodeDrag
               enableZoomInteraction
               enablePanInteraction
@@ -185,123 +351,77 @@ export function Topology() {
 
           {/* Zoom controls */}
           <div className="zoom-controls">
-            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoom(1.4, 400)} title="Zoom in">
-              <ZoomIn size={14} />
+            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoom(1.4, 350)} title="Zoom in">
+              <ZoomIn size={13} />
             </button>
-            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoom(0.7, 400)} title="Zoom out">
-              <ZoomOut size={14} />
+            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoom(0.7, 350)} title="Zoom out">
+              <ZoomOut size={13} />
             </button>
-            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoomToFit(400)} title="Fit all">
-              <Maximize2 size={14} />
+            <button className="btn btn--ghost btn--sm" onClick={() => graphRef.current?.zoomToFit(350, 40)} title="Fit all">
+              <Maximize2 size={13} />
             </button>
           </div>
         </div>
 
-        {/* Side panel */}
+        {/* Side panel — node list */}
         <div className="topo-panel">
-          {/* Legend */}
           <div className="topo-panel-section">
-            <div className="topo-panel-title">Legend</div>
-            {Object.entries(STATUS_COLOR).map(([status, color]) => (
-              <div key={status} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', fontSize: '0.82rem' }}>
-                <svg width={14} height={14}>
-                  <circle cx={7} cy={7} r={6} fill={color + '22'} stroke={color} strokeWidth={1.5} />
-                </svg>
-                <span style={{ color: 'var(--text-secondary)' }}>{status}</span>
+            <div className="topo-panel-title">Nodes</div>
+            {topology.nodes.length === 0 ? (
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textAlign: 'center', padding: '1rem 0' }}>
+                No nodes
               </div>
-            ))}
-            <div style={{ marginTop: '0.75rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
-                <svg width={28} height={6}><line x1={0} y1={3} x2={28} y2={3} stroke="#3fb950" strokeWidth={2} /></svg>
-                Active connection
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                {topology.nodes.map(n => (
+                  <NodeCard
+                    key={n.id}
+                    node={n}
+                    detail={detailByNodeId[n.id] ?? null}
+                    isExpanded={expandedIds.has(n.id)}
+                    isSelected={selectedId === n.id}
+                    onSelect={handleCardSelect}
+                    onToggle={handleCardToggle}
+                  />
+                ))}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <svg width={28} height={6}><line x1={0} y1={3} x2={28} y2={3} stroke="#373e47" strokeWidth={1} strokeDasharray="4 2" /></svg>
-                Inactive
-              </div>
-            </div>
+            )}
           </div>
 
-          {/* Network stats */}
+          {/* Network summary */}
           <div className="topo-panel-section">
-            <div className="topo-panel-title">Network</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.8rem' }}>
+            <div className="topo-panel-title">Summary</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
               {[
-                ['Nodes', topology.nodes.length],
-                ['Active', topology.nodes.filter(n => n.status === 'ACTIVE').length],
-                ['Links', topology.edges.length],
-                ['Active links', topology.edges.filter(e => e.status === 'ACTIVE').length],
+                ['Total nodes', topology.nodes.length],
+                ['Active', activeNodes],
+                ['Offline', topology.nodes.filter(n => n.status === 'OFFLINE').length],
+                ['Links', activeLinks],
               ].map(([label, val]) => (
-                <div key={label} style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: '0.5rem 0.6rem', border: '1px solid var(--border)' }}>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.68rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
-                  <div style={{ fontWeight: 700, fontSize: '1.1rem', marginTop: '0.15rem' }}>{val}</div>
+                <div key={label} className="topo-stat-cell">
+                  <div className="topo-stat-label">{label}</div>
+                  <div className="topo-stat-val">{val}</div>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Selected node detail */}
-          <div className="topo-panel-section" style={{ flex: 1 }}>
-            <div className="topo-panel-title">Selected Node</div>
-            {!selected ? (
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center', paddingTop: '1rem' }}>
-                Click a node to inspect
-              </div>
-            ) : (
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                  <svg width={12} height={12}>
-                    <circle cx={6} cy={6} r={5} fill={(STATUS_COLOR[selected.status] || '#6e7681') + '30'} stroke={STATUS_COLOR[selected.status] || '#6e7681'} strokeWidth={1.5} />
-                  </svg>
-                  <span style={{ fontWeight: 700, fontSize: '1rem' }}>{selected.name}</span>
+          {/* Total bandwidth */}
+          {detailed && (
+            <div className="topo-panel-section">
+              <div className="topo-panel-title">Total Bandwidth</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <div className="topo-kv-row">
+                  <span><ArrowDownLeft size={11} style={{ verticalAlign: 'middle' }} /> RX</span>
+                  <span style={{ color: 'var(--info)', fontWeight: 700 }}>{fmt(detailed.total_rx)}</span>
                 </div>
-                <div style={{ fontSize: '0.8rem', display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '1rem' }}>
-                  {[
-                    ['VPN IP', selected.vpn_ip],
-                    ['Status', selected.status],
-                  ].map(([k, v]) => (
-                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>{k}</span>
-                      <span style={{ fontWeight: 600, fontFamily: k === 'VPN IP' ? 'monospace' : undefined, color: k === 'Status' ? (STATUS_COLOR[v] || 'var(--text-primary)') : 'var(--text-primary)' }}>{v}</span>
-                    </div>
-                  ))}
+                <div className="topo-kv-row">
+                  <span><ArrowUpRight size={11} style={{ verticalAlign: 'middle' }} /> TX</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{fmt(detailed.total_tx)}</span>
                 </div>
-
-                {selectedDetail && (
-                  <>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.75rem' }}>
-                      <span style={{ color: 'var(--text-muted)' }}><ArrowDownLeft size={11} style={{ verticalAlign: 'middle' }} /> RX</span>
-                      <span style={{ color: 'var(--info)', fontWeight: 600 }}>{fmt(selectedDetail.total_rx)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.75rem' }}>
-                      <span style={{ color: 'var(--text-muted)' }}><ArrowUpRight size={11} style={{ verticalAlign: 'middle' }} /> TX</span>
-                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{fmt(selectedDetail.total_tx)}</span>
-                    </div>
-
-                    {selectedDetail.peers.length > 0 && (
-                      <>
-                        <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                          Peers ({selectedDetail.peers.length})
-                        </div>
-                        {selectedDetail.peers.map((p, i) => (
-                          <div key={i} style={{ background: 'var(--bg-primary)', border: '1px solid var(--border)', borderRadius: 6, padding: '0.5rem', marginBottom: '0.4rem', fontSize: '0.78rem' }}>
-                            <div style={{ fontFamily: 'monospace', color: 'var(--text-secondary)', marginBottom: '0.25rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {p.allowed_ips || p.public_key?.slice(0, 20) + '…'}
-                            </div>
-                            <div style={{ display: 'flex', gap: '0.75rem', color: 'var(--text-muted)' }}>
-                              <span><ArrowDownLeft size={9} /> {fmt(p.transfer_rx)}</span>
-                              <span><ArrowUpRight size={9} /> {fmt(p.transfer_tx)}</span>
-                              {p.latest_handshake_ago != null && <span><Clock size={9} /> {fmtHs(p.latest_handshake_ago)}</span>}
-                            </div>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                  </>
-                )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

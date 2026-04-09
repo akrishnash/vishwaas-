@@ -103,6 +103,10 @@ Below is every meaningful change made.
   after agent confirms VPN config received
 - `connection_service.py` — if `add_peer(node_a)` succeeds but `add_peer(node_b)` fails,
   rollback with `remove_peer(node_a)` — no half-broken connections created
+- `connection_service.py` — `terminate_connection_and_teardown` now only calls `remove_peer`
+  on both agents; does NOT call `wg_down`. WireGuard interface stays up on both nodes after
+  termination. Previous behavior called `wg_down` when a node had no remaining connections,
+  which tore down the whole interface — wrong, since the node should remain on the VPN.
 
 **Join lifecycle (`api/routes/join.py`)**
 - Rate limited: `@limiter.limit("10/minute")`
@@ -111,6 +115,9 @@ Below is every meaningful change made.
 - **Industry-grade restart handling**: when an agent restarts with the same key, the
   controller tears down all active connections on peer agents, deletes the stale node,
   and creates a fresh `PENDING` request — admin must re-approve every time
+- Bug fix: on approval, stamps `node.last_seen = now` before commit — prevents heartbeat from
+  immediately auto-deleting a freshly approved node (heartbeat treated `last_seen=None` as
+  `seconds_since = infinity > DELETE_THRESHOLD`)
 
 **Heartbeat (`core/heartbeat.py`)**
 - Runs every 60 seconds, pings all `ACTIVE`/`APPROVED`/`OFFLINE` nodes
@@ -118,6 +125,12 @@ Below is every meaningful change made.
 - Stage 2 (5min offline): auto-deletes node + its connections from DB
 - Restores `OFFLINE` → `ACTIVE` when node comes back
 - Updates Prometheus gauges after each sweep
+- **Startup sweep** (`startup=True`): on controller start, runs one immediate sweep that marks
+  unreachable nodes OFFLINE right away (no 90s threshold) — dashboard reflects reality instantly
+- **Stale join request expiry**: after each sweep, pings agents with PENDING join requests;
+  if unreachable for >120s, marks the request REJECTED so it doesn't clutter the dashboard
+- Bug fix: nodes with `last_seen=None` (just approved, never seen) are skipped during
+  offline/delete logic — prevents immediate auto-delete of freshly approved nodes
 
 **Observability**
 - `core/logging_config.py` — `VISHWAAS_LOG_JSON=true` switches to `pythonjsonlogger`
@@ -128,6 +141,10 @@ Below is every meaningful change made.
 - `core/correlation.py` — `ContextVar` for `X-Request-ID`; propagated to all agent calls
 - `api/routes/health.py` — `GET /health` (liveness), `GET /ready` (runs `SELECT 1`, 503 if DB down)
 - All list endpoints: `skip` + `limit` pagination
+- `routes/monitoring.py` — `GET /stats`: fixed `total_nodes` and `active_nodes` to count only
+  ACTIVE+APPROVED (previously `total_nodes` counted all nodes including OFFLINE)
+- `routes/monitoring.py` — `GET /topology`: fixed to return only ACTIVE+APPROVED nodes
+  (previously returned all nodes including OFFLINE, so network map showed stale/dead nodes)
 
 **Database**
 - `alembic/` — full migration setup replacing `create_all()`
@@ -160,7 +177,25 @@ Below is every meaningful change made.
 - `/health` endpoint: before returned `{"status": "ok", "state": "..."}` only; now returns
   `{"status", "state", "wg_interface", "wg_up": bool, "peer_count": int, "vpn_ip": str|null}`
 
-**Unchanged in agent**: `config.py`, `security.py`, `wireguard.py`, `tpm.py`
+**`app/wireguard.py`** (added in bug-fix session)
+- Added `_interface_is_up(iface)` — parses `ip link show` flags between `<` and `>`; returns
+  True only if `UP` flag is present. Previous `interface_exists()` returned True for DOWN
+  interfaces (only checked return code).
+- Added public `interface_is_up()` wrapper (called from `main.py` health endpoint and lifespan).
+- Fixed `provision_interface()` when interface already exists: reads all `inet` addresses via
+  `ip address show dev <iface>`, removes any that don't match the newly assigned IP before
+  adding the correct one — prevents two IPs coexisting on wg0.
+
+**`app/main.py`** (further changes in bug-fix session)
+- Removed dead `_already_active()` function (leftover, was not called).
+- Fixed `/health` endpoint: uses `wireguard.interface_is_up()` instead of `interface_exists()`.
+- Fixed `set_vpn_address` endpoint: always sets `_join_decided = True` when
+  `provision_interface()` succeeds, regardless of whether a private key was issued. Previously
+  only set when private_key was present — caused infinite join loop re-submissions.
+- Added WireGuard teardown in lifespan shutdown: if `interface_is_up()`, calls `wg_down()` so
+  the interface doesn't linger after the agent process exits.
+
+**Unchanged in agent**: `config.py`, `security.py`, `tpm.py`
 
 ---
 
@@ -227,6 +262,9 @@ Both succeed
 Connection record ACTIVE
 
 Admin terminates → remove_peer on both agents → Connection TERMINATED
+    Both nodes keep their WireGuard interface UP with their VPN IPs intact.
+    They return to the same state as "approved but no connections" — still on
+    the VPN, just no longer peered with each other.
 Node deleted → remove_peer on all connected peers → connections deleted
 ```
 

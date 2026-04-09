@@ -154,7 +154,9 @@ def list_logs(
 @router.get("/topology", response_model=TopologySchema)
 def get_topology(db: Session = Depends(get_db)):
     """Return graph-style topology: nodes + active connections as edges."""
-    nodes_db = db.query(Node).all()
+    nodes_db = db.query(Node).filter(
+        Node.status.in_((NodeStatus.ACTIVE, NodeStatus.APPROVED))
+    ).all()
     conns_db = db.query(Connection).filter(Connection.status == ConnectionStatus.ACTIVE).all()
     nodes = [
         {

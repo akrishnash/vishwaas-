@@ -524,3 +524,105 @@ body {
   text-align: center;
   gap: 0.5rem;
 }
+
+/* ── Topology node cards (side panel) ── */
+.topo-node-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.topo-node-card--selected {
+  border-color: rgba(255,255,255,0.18);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
+}
+.topo-node-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+  gap: 0.5rem;
+  user-select: none;
+}
+.topo-node-card-header:hover { background: var(--bg-hover); }
+.topo-node-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.topo-node-ip {
+  font-size: 0.72rem;
+  font-family: monospace;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.topo-node-card-body {
+  padding: 0.5rem 0.6rem 0.6rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.topo-kv-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.topo-kv-row span:last-child { color: var(--text-primary); }
+.topo-subsection-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+.topo-peer-row {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.72rem;
+}
+.topo-peer-ip {
+  font-family: monospace;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 0.2rem;
+}
+.topo-peer-stats {
+  display: flex;
+  gap: 0.6rem;
+  color: var(--text-muted);
+  align-items: center;
+}
+.topo-stat-cell {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+}
+.topo-stat-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.topo-stat-val {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-top: 0.1rem;
+}

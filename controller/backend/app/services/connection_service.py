@@ -9,7 +9,7 @@ from sqlalchemy import or_
 
 from app.persistence.models import Node, ConnectionRequest, Connection
 from app.domain.enums import ConnectionStatus, ConnectionRequestStatus
-from app.services.agent_client import add_peer, remove_peer, wg_down, enable_ip_forward, _endpoint_from_agent_url
+from app.services.agent_client import add_peer, remove_peer, enable_ip_forward, _endpoint_from_agent_url
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +124,11 @@ def terminate_connection(db: Session, connection_id: int) -> bool:
 
 async def terminate_connection_and_teardown(db: Session, connection_id: int) -> bool:
     """
-    Remove peers from both agents, set connection TERMINATED, then for each node
-    if it has no other ACTIVE connections call wg_down on that agent.
-    Returns True if connection was active and teardown was run.
+    Remove the peer keys from both agents and mark the connection TERMINATED.
+    The WireGuard interface stays up on both nodes — they remain on the VPN with
+    their assigned IPs, just no longer peered with each other (same state as
+    approved-but-no-connection).
+    Returns True if the connection was active and teardown was run.
     """
     conn = db.query(Connection).filter(Connection.id == connection_id).first()
     if not conn or conn.status != ConnectionStatus.ACTIVE:
@@ -147,19 +149,4 @@ async def terminate_connection_and_teardown(db: Session, connection_id: int) -> 
     await remove_peer(node_b.agent_url, node_a.public_key)
     conn.status = ConnectionStatus.TERMINATED
     db.flush()
-
-    def other_active_connections_for(node_id: int) -> int:
-        return (
-            db.query(Connection)
-            .filter(Connection.status == ConnectionStatus.ACTIVE)
-            .filter(or_(Connection.node_a_id == node_id, Connection.node_b_id == node_id))
-            .count()
-        )
-
-    if other_active_connections_for(node_a.id) == 0:
-        logger.info("terminate_connection_and_teardown: wg_down %s (%s)", node_a.name, node_a.agent_url)
-        await wg_down(node_a.agent_url)
-    if other_active_connections_for(node_b.id) == 0:
-        logger.info("terminate_connection_and_teardown: wg_down %s (%s)", node_b.name, node_b.agent_url)
-        await wg_down(node_b.agent_url)
     return True
