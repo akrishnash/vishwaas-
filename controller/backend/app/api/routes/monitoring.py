@@ -33,7 +33,9 @@ _STATS_SEMAPHORE = asyncio.Semaphore(20)
 def get_stats(db: Session = Depends(get_db)):
     """Dashboard overview counts."""
     total_nodes = db.query(Node).count()
-    active_nodes = db.query(Node).filter(Node.status == NodeStatus.ACTIVE).count()
+    active_nodes = db.query(Node).filter(
+        Node.status.in_((NodeStatus.ACTIVE, NodeStatus.APPROVED))
+    ).count()
     pending_join_requests = (
         db.query(JoinRequest).filter(JoinRequest.status == JoinRequestStatus.PENDING).count()
     )
