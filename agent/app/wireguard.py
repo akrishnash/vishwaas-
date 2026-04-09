@@ -254,20 +254,35 @@ def provision_interface(vpn_ip: str) -> dict[str, Any]:
                 return {"success": False, "message": "ip link set up failed", "detail": result.stderr}
             set_assigned_vpn_ip(vpn_ip)
             return {"success": True, "message": "WireGuard started", "detail": None}
-        # Interface exists: do not touch private key. Verify IP and ensure up.
+        # Interface exists: do not touch private key.
+        # Remove any stale IPs that differ from the assigned one, then add the correct one.
         set_assigned_vpn_ip(vpn_ip)
+        ip_base = addr.split("/")[0]
+        show = subprocess.run(
+            ["ip", "address", "show", "dev", iface],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in show.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                parts = line.split()
+                current = parts[1]  # e.g. "10.10.10.4/24"
+                if current.split("/")[0] != ip_base:
+                    logger.info("provision_interface: removing stale IP %s from %s", current, iface)
+                    subprocess.run(
+                        ["ip", "address", "del", current, "dev", iface],
+                        capture_output=True, text=True, timeout=10,
+                    )
         result = subprocess.run(
             ["ip", "address", "add", addr, "dev", iface],
-            capture_output=True,
-            text=True,
-            timeout=10,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0 and "File exists" not in result.stderr:
-            pass  # Address may already be correct
+            logger.warning("provision_interface: ip address add %s failed: %s", addr, result.stderr.strip())
         result = subprocess.run(["ip", "link", "set", iface, "up"], capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
             return {"success": False, "message": "ip link set up failed", "detail": result.stderr}
-        logger.info("provision_interface: interface %s already exists, ensured up", iface)
+        logger.info("provision_interface: interface %s ensured up with %s", iface, addr)
         return {"success": True, "message": "Interface up", "detail": None}
     except Exception as e:
         logger.exception("provision_interface failed")
