@@ -176,6 +176,7 @@ async def approve_join_request(id: int, db: Session = Depends(get_db)):
     from app.services.agent_client import set_vpn_address
     from app.services.join_service import approve_join_with_issued_key
     from app.domain.enums import NodeStatus
+    from datetime import datetime, timezone
 
     logger.info("approve_join_request: id=%s", id)
 
@@ -189,6 +190,10 @@ async def approve_join_request(id: int, db: Session = Depends(get_db)):
     if not node:
         logger.warning("approve_join_request: id=%s not found or not pending", id)
         raise HTTPException(status_code=400, detail="Join request not found or not pending")
+
+    # Stamp last_seen so heartbeat doesn't immediately auto-delete a newly approved node
+    # (heartbeat treats last_seen=None as "offline forever" → instant delete)
+    node.last_seen = datetime.now(timezone.utc)
 
     log_event(db, LogEventType.JOIN_APPROVED, f"Join approved: {node.name} -> {node.vpn_ip}")
     notify(db, NotificationType.JOIN_APPROVED, f"Node {node.name} approved with IP {node.vpn_ip}")

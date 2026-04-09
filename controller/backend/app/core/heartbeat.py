@@ -70,7 +70,10 @@ async def _sweep() -> None:
                     node.status = NodeStatus.ACTIVE
             else:
                 last = node.last_seen
-                seconds_since = (now - last).total_seconds() if last else float("inf")
+                if last is None:
+                    # Never seen — node was just approved; give it time to come up
+                    continue
+                seconds_since = (now - last).total_seconds()
                 if seconds_since > DELETE_THRESHOLD_SECONDS:
                     # Stage 2: been offline too long — auto-delete
                     logger.warning(
