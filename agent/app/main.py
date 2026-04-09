@@ -196,6 +196,10 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
+    # Tear down WireGuard on clean shutdown so the interface doesn't linger
+    if wireguard.interface_is_up():
+        logger.info("Lifespan: bringing down WireGuard interface on shutdown")
+        wireguard.wg_down()
 
 
 app = FastAPI(

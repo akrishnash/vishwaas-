@@ -20,6 +20,7 @@ logger = logging.getLogger("vishwaas.heartbeat")
 HEARTBEAT_INTERVAL = 60           # seconds between sweeps
 OFFLINE_THRESHOLD_SECONDS = 90   # mark OFFLINE if silent for this long
 DELETE_THRESHOLD_SECONDS = 300   # auto-delete node if offline for this long (5 min)
+STALE_JOIN_REQUEST_SECONDS = 120 # expire PENDING join requests if agent unreachable for this long
 
 
 async def _ping(url: str, timeout: float = 5.0) -> bool:
@@ -98,6 +99,10 @@ async def _sweep() -> None:
                     node.status = NodeStatus.OFFLINE
 
         db.commit()
+
+        # Expire stale PENDING join requests where the agent is no longer reachable
+        await _expire_stale_join_requests(db, now)
+
         _update_gauges(db)
 
     except Exception:
@@ -105,6 +110,35 @@ async def _sweep() -> None:
         db.rollback()
     finally:
         db.close()
+
+
+async def _expire_stale_join_requests(db, now) -> None:
+    """
+    Ping agents with PENDING join requests. If the agent is unreachable and the
+    request is older than STALE_JOIN_REQUEST_SECONDS, mark it REJECTED so it
+    doesn't clutter the dashboard after the machine goes offline.
+    """
+    pending = db.query(JoinRequest).filter(JoinRequest.status == JoinRequestStatus.PENDING).all()
+    if not pending:
+        return
+
+    results = await asyncio.gather(
+        *[_ping(jr.agent_url) for jr in pending],
+        return_exceptions=True,
+    )
+    for jr, alive in zip(pending, results):
+        if isinstance(alive, Exception):
+            alive = False
+        if alive:
+            continue
+        age = (now - jr.requested_at).total_seconds() if jr.requested_at else float("inf")
+        if age > STALE_JOIN_REQUEST_SECONDS:
+            logger.info(
+                "heartbeat: join request id=%s (%s) agent unreachable for %.0fs — expiring",
+                jr.id, jr.node_name, age,
+            )
+            jr.status = JoinRequestStatus.REJECTED
+    db.commit()
 
 
 def _update_gauges(db) -> None:
