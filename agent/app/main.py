@@ -258,13 +258,14 @@ def set_vpn_address(body: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:
             log_error("set-vpn-address: writing controller key failed", e)
             return {"success": False, "message": str(e), "detail": None}
-        _join_decided = True
     else:
         logger.info("set-vpn-address: received vpn_ip=%s", vpn_ip)
     result = wireguard.provision_interface(vpn_ip)
     if result.get("success"):
+        # Controller has approved and pushed VPN config — stop the join loop
+        _join_decided = True
         state.set_active()
-        logger.info("set-vpn-address: WireGuard provisioned with vpn_ip=%s", vpn_ip)
+        logger.info("set-vpn-address: WireGuard provisioned with vpn_ip=%s, join loop stopped", vpn_ip)
     else:
         logger.warning("set-vpn-address: provision_interface failed: %s", result.get("detail") or result.get("message"))
     return result
