@@ -34,19 +34,23 @@ async def _ping(url: str, timeout: float = 5.0) -> bool:
 
 
 async def heartbeat_loop() -> None:
-    """Run forever; sweep once per HEARTBEAT_INTERVAL."""
+    """Run forever; sweep once per HEARTBEAT_INTERVAL. First sweep runs immediately on startup."""
     logger.info(
         "Heartbeat loop started (interval=%ss, offline_threshold=%ss)",
         HEARTBEAT_INTERVAL,
         OFFLINE_THRESHOLD_SECONDS,
     )
+    # Immediate sweep on startup — use aggressive mode so nodes that don't respond
+    # are marked OFFLINE right away instead of waiting 90s
+    await _sweep(startup=True)
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL)
         await _sweep()
 
 
-async def _sweep() -> None:
-    """One heartbeat sweep: ping all active/approved nodes, update status."""
+async def _sweep(startup: bool = False) -> None:
+    """One heartbeat sweep: ping all active/approved nodes, update status.
+    startup=True: mark unreachable nodes OFFLINE immediately (no threshold wait)."""
     db = SessionLocal()
     try:
         nodes = (
@@ -70,6 +74,17 @@ async def _sweep() -> None:
                     logger.info("heartbeat: node %s (%s) is back ONLINE", node.name, node.agent_url)
                     node.status = NodeStatus.ACTIVE
             else:
+                if startup:
+                    # On controller startup: immediately mark unreachable nodes OFFLINE
+                    # so the dashboard reflects reality instead of showing stale ACTIVE nodes
+                    if node.status != NodeStatus.OFFLINE:
+                        logger.info(
+                            "heartbeat startup: node %s unreachable — marking OFFLINE immediately",
+                            node.name,
+                        )
+                        node.status = NodeStatus.OFFLINE
+                    continue
+
                 last = node.last_seen
                 if last is None:
                     # Never seen — node was just approved; give it time to come up
