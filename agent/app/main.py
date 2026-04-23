@@ -25,6 +25,7 @@ from app.config import (
     get_agent_bind_host,
     get_agent_port,
     get_controller_issues_keys,
+    get_keys_dir,
     get_master_token,
     get_master_url,
     get_node_name,
@@ -35,6 +36,7 @@ from app.logger import (
     log_startup,
     log_join_request,
     log_error,
+    set_keys_dir_log,
 )
 from app.security import require_master_token, log_unauthorized, get_client_ip
 from app.state import get_state, set_waiting, set_active, set_error
@@ -170,6 +172,9 @@ async def _join_loop():
     while not _join_decided:
         if _send_join_request():
             set_waiting()
+        # Re-check before sleeping: set_vpn_address may have fired during the request
+        if _join_decided:
+            break
         await asyncio.sleep(JOIN_RETRY_INTERVAL)
     logger.info("Join loop finished (approved or rejected)")
 
@@ -179,16 +184,28 @@ async def lifespan(app: FastAPI):
     """Startup: generate keys, send join, start background join loop. Shutdown: no-op."""
     global _join_decided
     log_startup()
+    # Attach rotating file log inside keys_dir so GET /logs can serve it
+    try:
+        set_keys_dir_log(get_keys_dir())
+    except Exception:
+        pass
     logger.debug("Lifespan: generating keypair (if needed)")
     try:
         wireguard.generate_keypair()
     except Exception as e:
         log_error("Startup key generation failed", e)
         set_error()
-    # Always send a fresh join request on startup so controller sees it as pending.
-    # Controller will re-approve and push VPN config again.
-    logger.info("Lifespan: starting join loop")
-    task = asyncio.create_task(_join_loop())
+    # If already provisioned (VPN IP assigned and wg0 is up), skip join loop entirely.
+    # This handles normal agent restarts — no need to re-approve on every restart.
+    vpn_ip = wireguard.get_assigned_vpn_ip()
+    if vpn_ip and wireguard.interface_is_up():
+        logger.info("Lifespan: already provisioned (vpn_ip=%s, wg0 up) — skipping join loop", vpn_ip)
+        _join_decided = True
+        state.set_active()
+        task = asyncio.create_task(asyncio.sleep(0))
+    else:
+        logger.info("Lifespan: starting join loop (vpn_ip=%s, wg0_up=%s)", vpn_ip, wireguard.interface_is_up())
+        task = asyncio.create_task(_join_loop())
     yield
     logger.info("Lifespan: shutting down, cancelling join loop")
     task.cancel()
@@ -406,6 +423,23 @@ def remove_node() -> dict[str, Any]:
     result = wireguard.wg_remove_node()
     log_command("/remove-node", result.get("success", False), result.get("detail", ""))
     return result
+
+
+@app.get("/logs", dependencies=[Depends(require_master_token)])
+def get_logs(n: int = 200) -> dict[str, Any]:
+    """Return last N lines from the agent log file (max 1000)."""
+    n = min(max(1, n), 1000)
+    try:
+        log_path = get_keys_dir() / "agent.log"
+        if not log_path.exists():
+            return {"lines": [], "total": 0, "file": str(log_path)}
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = [line.rstrip("\n") for line in all_lines[-n:]]
+        return {"lines": tail, "total": len(all_lines), "file": str(log_path)}
+    except Exception as e:
+        log_error("GET /logs failed", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---- Global exception handler: never crash, return JSON

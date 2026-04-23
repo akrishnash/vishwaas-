@@ -68,5 +68,36 @@ export const api = {
   getTopology: () => request('/topology'),
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/mark-read`, { method: 'POST' }),
-  getLogs: (eventType) => request(eventType ? `/logs?event_type=${encodeURIComponent(eventType)}` : '/logs'),
+  getLogs: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.event_type) q.set('event_type', params.event_type);
+    if (params.search) q.set('search', params.search);
+    if (params.date_from) q.set('date_from', params.date_from);
+    if (params.date_to) q.set('date_to', params.date_to);
+    if (params.performed_by) q.set('performed_by', params.performed_by);
+    if (params.skip != null) q.set('skip', params.skip);
+    if (params.limit != null) q.set('limit', params.limit);
+    const qs = q.toString();
+    return request(qs ? `/logs?${qs}` : '/logs');
+  },
+  downloadLogs: async (params = {}) => {
+    const q = new URLSearchParams(params);
+    const url = `${BASE}/logs/export?${q.toString()}`;
+    const token = localStorage.getItem('vw_token');
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : `vishwaas-logs.${params.format || 'csv'}`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  },
+  getSystemLogs: (n = 200) => request(`/system-logs?n=${n}`),
+  getNodeLogs: (id, n = 200) => request(`/nodes/${id}/logs?n=${n}`),
 };

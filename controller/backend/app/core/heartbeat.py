@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 
 import httpx
 
+from datetime import timedelta
+
 from app.persistence.database import SessionLocal
-from app.persistence.models import Node, JoinRequest
+from app.persistence.models import Node, JoinRequest, Log
 from app.domain.enums import NodeStatus, JoinRequestStatus
 
 logger = logging.getLogger("vishwaas.heartbeat")
@@ -118,6 +120,7 @@ async def _sweep(startup: bool = False) -> None:
         # Expire stale PENDING join requests where the agent is no longer reachable
         await _expire_stale_join_requests(db, now)
 
+        _prune_old_logs(db, now)
         _update_gauges(db)
 
     except Exception:
@@ -154,6 +157,20 @@ async def _expire_stale_join_requests(db, now) -> None:
             )
             jr.status = JoinRequestStatus.REJECTED
     db.commit()
+
+
+def _prune_old_logs(db, now) -> None:
+    """Delete audit logs older than settings.log_retention_days."""
+    try:
+        from app.core.config import settings
+        cutoff = now - timedelta(days=settings.log_retention_days)
+        deleted = db.query(Log).filter(Log.created_at < cutoff).delete(synchronize_session=False)
+        if deleted:
+            logger.info("heartbeat: pruned %s audit log entries older than %s days", deleted, settings.log_retention_days)
+        db.commit()
+    except Exception:
+        logger.exception("heartbeat: log pruning failed")
+        db.rollback()
 
 
 def _update_gauges(db) -> None:

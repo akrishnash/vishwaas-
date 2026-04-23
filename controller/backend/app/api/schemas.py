@@ -169,6 +169,7 @@ class LogSchema(BaseModel):
     id: int
     event_type: LogEventType
     description: str
+    performed_by: Optional[str] = None
     created_at: datetime
 
     class Config:

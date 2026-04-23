@@ -117,9 +117,10 @@ class Log(Base):
     __tablename__ = "logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    event_type = Column(SQLEnum(LogEventType), nullable=False)
+    event_type = Column(SQLEnum(LogEventType), nullable=False, index=True)
     description = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    performed_by = Column(String(255), nullable=True)  # username or "system"
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
 
 class RevokedToken(Base):

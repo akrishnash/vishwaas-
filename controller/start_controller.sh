@@ -41,7 +41,7 @@ else
   echo "Starting controller in DEVELOPMENT mode (bind=0.0.0.0, reload enabled)"
 fi
 
-.venv/bin/python -m uvicorn app.main:app $RELOAD_FLAG --host "$BIND_HOST" --port 8000 --log-config none \
+.venv/bin/python -m uvicorn app.main:app $RELOAD_FLAG --host "$BIND_HOST" --port 8000 --no-access-log \
   2>&1 | tee "$LOGS/backend.log" &
 BACKEND_PID=$!
 

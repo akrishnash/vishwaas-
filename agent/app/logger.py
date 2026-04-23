@@ -10,6 +10,7 @@ Set VISHWAAS_AGENT_LOG_JSON=true to emit JSON lines for log aggregators.
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Default log path for production; overridable via env
@@ -18,6 +19,17 @@ LOG_PATH = os.environ.get("VISHWAAS_AGENT_LOG", "/var/log/vishwaas-agent.log")
 DEBUG_MODE = os.environ.get("VISHWAAS_AGENT_DEBUG", "").strip() in ("1", "true", "yes")
 # Set VISHWAAS_AGENT_LOG_JSON=true for structured JSON output
 JSON_MODE = os.environ.get("VISHWAAS_AGENT_LOG_JSON", "").lower() in ("true", "1", "yes")
+
+# Rotating log inside keys_dir so the API can serve it
+_KEYS_DIR_LOG: Path | None = None
+
+
+def set_keys_dir_log(keys_dir: Path) -> None:
+    """Call once after config is loaded to enable the keys_dir rotating log file."""
+    global _KEYS_DIR_LOG
+    _KEYS_DIR_LOG = keys_dir / "agent.log"
+    if _logger is not None:
+        _attach_rotating_handler(_logger, _KEYS_DIR_LOG)
 
 _logger: logging.Logger | None = None
 
@@ -45,6 +57,18 @@ def _build_formatter() -> logging.Formatter:
     )
 
 
+def _attach_rotating_handler(logger: logging.Logger, path: Path) -> None:
+    """Attach a rotating file handler to logger if the path is writable."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rh = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        rh.setLevel(logging.DEBUG)
+        rh.setFormatter(_build_formatter())
+        logger.addHandler(rh)
+    except (OSError, PermissionError):
+        pass
+
+
 def _ensure_logger() -> logging.Logger:
     global _logger
     if _logger is not None:
@@ -57,18 +81,14 @@ def _ensure_logger() -> logging.Logger:
     fmt = _build_formatter()
     stderr_level = logging.DEBUG if DEBUG_MODE else logging.INFO
 
-    # Try file first (production)
-    try:
-        log_path = Path(LOG_PATH)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    except (OSError, PermissionError):
-        pass
+    # Rotating handler at system log path (production)
+    _attach_rotating_handler(logger, Path(LOG_PATH))
 
-    # Always attach stderr for systemd/journal visibility (DEBUG when VISHWAAS_AGENT_DEBUG=1)
+    # Rotating handler at keys_dir if already configured
+    if _KEYS_DIR_LOG is not None:
+        _attach_rotating_handler(logger, _KEYS_DIR_LOG)
+
+    # Always attach stderr for systemd/journal visibility
     sh = logging.StreamHandler(sys.stderr)
     sh.setLevel(stderr_level)
     sh.setFormatter(fmt)

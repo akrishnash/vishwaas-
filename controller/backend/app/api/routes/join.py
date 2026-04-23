@@ -18,6 +18,7 @@ from app.persistence.models import JoinRequest, Node
 from app.api.schemas import RequestJoinBody, JoinRequestSchema
 from app.domain.enums import JoinRequestStatus
 from app.core.config import settings
+from app.core.security import require_auth
 from app.services.join_service import approve_join, reject_join
 from app.services.log_notify import log_event, notify
 from app.domain.enums import LogEventType, NotificationType
@@ -146,7 +147,7 @@ async def request_join(request: Request, body: RequestJoinBody, db: Session = De
         status=JoinRequestStatus.PENDING,
     )
     db.add(jr)
-    log_event(db, LogEventType.JOIN_REQUESTED, f"Join requested: {body.node_name}")
+    log_event(db, LogEventType.JOIN_REQUESTED, f"Join requested: {body.node_name}", performed_by="agent")
     db.commit()
     db.refresh(jr)
     logger.info("request-join: new join request id=%s -> PENDING", jr.id)
@@ -166,7 +167,7 @@ def list_join_requests(
 
 
 @router.post("/join-requests/{id}/approve")
-async def approve_join_request(id: int, db: Session = Depends(get_db)):
+async def approve_join_request(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """
     Approve join — two-phase:
       Phase 1: DB writes (node APPROVED, join request marked, log, notify) → commit.
@@ -195,7 +196,7 @@ async def approve_join_request(id: int, db: Session = Depends(get_db)):
     # (heartbeat treats last_seen=None as "offline forever" → instant delete)
     node.last_seen = datetime.now(timezone.utc)
 
-    log_event(db, LogEventType.JOIN_APPROVED, f"Join approved: {node.name} -> {node.vpn_ip}")
+    log_event(db, LogEventType.JOIN_APPROVED, f"Join approved: {node.name} -> {node.vpn_ip}", performed_by=current_user.get("sub"))
     notify(db, NotificationType.JOIN_APPROVED, f"Node {node.name} approved with IP {node.vpn_ip}")
     db.commit()  # node.status == APPROVED at this point
 
@@ -217,13 +218,13 @@ async def approve_join_request(id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/join-requests/{id}/reject")
-def reject_join_request(id: int, db: Session = Depends(get_db)):
+def reject_join_request(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Reject a join request."""
     logger.info("reject_join_request: id=%s", id)
     if not reject_join(db, id):
         logger.warning("reject_join_request: id=%s not found or not pending", id)
         raise HTTPException(status_code=400, detail="Join request not found or not pending")
-    log_event(db, LogEventType.JOIN_REJECTED, f"Join rejected: id={id}")
+    log_event(db, LogEventType.JOIN_REJECTED, f"Join rejected: id={id}", performed_by=current_user.get("sub"))
     notify(db, NotificationType.JOIN_REJECTED, f"Join request (id={id}) rejected")
     db.commit()
     return {"ok": True}

@@ -3,8 +3,8 @@ from app.persistence.models import Log, Notification
 from app.domain.enums import LogEventType, NotificationType
 
 
-def log_event(db, event_type: LogEventType, description: str):
-    db.add(Log(event_type=event_type, description=description))
+def log_event(db, event_type: LogEventType, description: str, performed_by: str | None = None):
+    db.add(Log(event_type=event_type, description=description, performed_by=performed_by))
 
 
 def notify(db, type: NotificationType, message: str):

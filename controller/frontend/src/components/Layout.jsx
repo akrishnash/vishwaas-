@@ -1,9 +1,10 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { TopBar } from './TopBar';
 import { useStats } from '../context/StatsContext';
+import { useToast } from '../context/ToastContext';
 import {
   LayoutDashboard, Globe, Share2, Server, LogIn,
-  GitMerge, Link, FileText, ShieldCheck,
+  GitMerge, Link, FileText, ShieldCheck, Download,
 } from 'lucide-react';
 
 const NAV = [
@@ -22,6 +23,30 @@ const NAV = [
 
 export function Layout() {
   const { stats, refreshStats } = useStats();
+  const { addToast } = useToast();
+
+  const handleBackup = async () => {
+    try {
+      const BASE = '/api';
+      const token = localStorage.getItem('vw_token');
+      const res = await fetch(`${BASE}/backup`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(res.statusText);
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : 'vishwaas-backup.db';
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      addToast(e.message || 'Backup download failed', 'error');
+    }
+  };
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -46,7 +71,22 @@ export function Layout() {
             );
           })}
         </nav>
-        <div className="sidebar-footer">v1.0 · WireGuard VPN</div>
+        <div className="sidebar-footer" style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+          <button
+            type="button"
+            onClick={handleBackup}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '0.4rem',
+              background: 'none', border: '1px solid var(--border)',
+              color: 'var(--text-muted)', borderRadius: 'var(--radius-sm)',
+              padding: '0.3rem 0.6rem', cursor: 'pointer', fontSize: '0.75rem',
+              fontFamily: 'var(--font)', width: '100%', justifyContent: 'center',
+            }}
+          >
+            <Download size={12} /> Download Backup
+          </button>
+          <span>v1.0 · WireGuard VPN</span>
+        </div>
       </aside>
       <main className="main">
         <TopBar unreadCount={stats?.unread_notifications ?? 0} onRefresh={refreshStats} />

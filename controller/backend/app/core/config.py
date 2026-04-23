@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     jwt_expire_minutes: int = 480  # 8 hours
 
+    # Rotating log file for /system-logs endpoint (relative to backend working dir)
+    log_file: str = "./logs/controller.log"
+    # Audit log retention: logs older than this many days are pruned by heartbeat
+    log_retention_days: int = 90
+
     class Config:
         env_file = ".env"
         env_prefix = "VISHWAAS_"

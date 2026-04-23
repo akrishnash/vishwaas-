@@ -280,6 +280,29 @@ async def enable_ip_forward(
         return False
 
 
+async def get_agent_logs(
+    agent_base_url: str,
+    n: int = 200,
+    timeout: Optional[float] = None,
+) -> Optional[dict]:
+    """Fetch last N log lines from agent. Returns parsed JSON or None."""
+    url = f"{agent_base_url.rstrip('/')}/logs"
+    _t = timeout if timeout is not None else 5.0
+
+    async def _do():
+        client = _get_client()
+        return await client.get(url, params={"n": n}, headers=_agent_headers(), timeout=_t)
+
+    try:
+        r = await _call_with_retry(_do, retries=0)
+        if r.is_success:
+            return r.json()
+        return None
+    except Exception as e:
+        logger.debug("get_agent_logs failed %s: %s", agent_base_url, e)
+        return None
+
+
 async def wg_down(
     agent_base_url: str,
     timeout: Optional[float] = None,

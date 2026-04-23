@@ -6,6 +6,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.security import require_auth
+
 from app.persistence.database import get_db
 from app.persistence.models import ConnectionRequest, Connection, Node
 from app.api.schemas import (
@@ -53,7 +55,7 @@ def _connection_with_nodes(db: Session, c: Connection) -> ConnectionWithNodesSch
 
 
 @router.post("/request-connection", response_model=ConnectionRequestSchema)
-def request_connection(body: RequestConnectionBody, db: Session = Depends(get_db)):
+def request_connection(body: RequestConnectionBody, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Request a connection between two nodes."""
     logger.info("request-connection: requester_id=%s target_id=%s", body.requester_id, body.target_id)
     if body.requester_id == body.target_id:
@@ -80,11 +82,7 @@ def request_connection(body: RequestConnectionBody, db: Session = Depends(get_db
         status=ConnectionRequestStatus.PENDING,
     )
     db.add(cr)
-    log_event(
-        db,
-        LogEventType.CONNECTION_REQUESTED,
-        f"Connection requested: {body.requester_id} -> {body.target_id}",
-    )
+    log_event(db, LogEventType.CONNECTION_REQUESTED, f"Connection requested: {body.requester_id} -> {body.target_id}", performed_by=current_user.get("sub"))
     db.commit()
     db.refresh(cr)
     logger.info("request-connection: created id=%s", cr.id)
@@ -103,7 +101,7 @@ def list_connection_requests(
 
 
 @router.post("/connection-requests/{id}/approve")
-async def approve_connection_request(id: int, db: Session = Depends(get_db)):
+async def approve_connection_request(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Approve: call agents, create connection, log, notify."""
     logger.info("approve_connection_request: id=%s", id)
     conn = await approve_connection(db, id)
@@ -120,7 +118,7 @@ async def approve_connection_request(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Connection request not found or not pending")
     a = db.query(Node).get(conn.node_a_id)
     b = db.query(Node).get(conn.node_b_id)
-    log_event(db, LogEventType.CONNECTION_APPROVED, f"Connection approved: {a.name} <-> {b.name}")
+    log_event(db, LogEventType.CONNECTION_APPROVED, f"Connection approved: {a.name} <-> {b.name}", performed_by=current_user.get("sub"))
     notify(db, NotificationType.CONNECTION_APPROVED, f"Connection {a.name} <-> {b.name} active")
     db.commit()
     logger.info("approve_connection_request: connection_id=%s %s <-> %s", conn.id, a.name, b.name)
@@ -128,12 +126,12 @@ async def approve_connection_request(id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/connection-requests/{id}/reject")
-def reject_connection_request(id: int, db: Session = Depends(get_db)):
+def reject_connection_request(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Reject a connection request."""
     logger.info("reject_connection_request: id=%s", id)
     if not reject_connection(db, id):
         raise HTTPException(status_code=400, detail="Connection request not found or not pending")
-    log_event(db, LogEventType.CONNECTION_REJECTED, f"Connection request id={id} rejected")
+    log_event(db, LogEventType.CONNECTION_REJECTED, f"Connection request id={id} rejected", performed_by=current_user.get("sub"))
     notify(db, NotificationType.CONNECTION_REJECTED, f"Connection request (id={id}) rejected")
     db.commit()
     return {"ok": True}
@@ -151,7 +149,7 @@ def list_connections(
 
 
 @router.delete("/connections/{id}")
-async def delete_connection(id: int, db: Session = Depends(get_db)):
+async def delete_connection(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Terminate connection: remove peers from both agents, mark TERMINATED. Interface stays up on both nodes."""
     logger.info("delete_connection: id=%s", id)
     conn = db.query(Connection).filter(Connection.id == id).first()
@@ -162,7 +160,7 @@ async def delete_connection(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Connection not active")
     a = db.query(Node).get(conn.node_a_id)
     b = db.query(Node).get(conn.node_b_id)
-    log_event(db, LogEventType.CONNECTION_TERMINATED, f"Connection terminated: {a.name} <-> {b.name}")
+    log_event(db, LogEventType.CONNECTION_TERMINATED, f"Connection terminated: {a.name} <-> {b.name}", performed_by=current_user.get("sub"))
     notify(db, NotificationType.CONNECTION_TERMINATED, f"Connection {a.name} <-> {b.name} terminated")
     db.commit()
     logger.info("delete_connection: terminated connection_id=%s %s <-> %s", id, a.name, b.name)

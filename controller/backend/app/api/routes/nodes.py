@@ -13,8 +13,9 @@ class SetGatewayBody(BaseModel):
     is_gateway: bool
 from app.domain.enums import NodeStatus, ConnectionStatus
 from app.services.log_notify import log_event
-from app.services.agent_client import set_vpn_address, remove_peer, remove_node
+from app.services.agent_client import set_vpn_address, remove_peer, remove_node, get_agent_logs
 from app.domain.enums import LogEventType
+from app.core.security import require_auth
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 logger = logging.getLogger(__name__)
@@ -92,8 +93,22 @@ def set_gateway(id: int, body: SetGatewayBody, db: Session = Depends(get_db)):
     return node
 
 
+@router.get("/{id}/logs")
+async def get_node_logs(id: int, n: int = Query(default=200, ge=1, le=1000), db: Session = Depends(get_db)):
+    """Proxy last N log lines from a node's agent."""
+    node = db.query(Node).filter(Node.id == id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if not node.agent_url:
+        raise HTTPException(status_code=400, detail="Node has no agent URL")
+    data = await get_agent_logs(node.agent_url, n=n)
+    if data is None:
+        raise HTTPException(status_code=502, detail="Agent unreachable or no log file yet")
+    return data
+
+
 @router.delete("")
-async def delete_all_nodes(db: Session = Depends(get_db)):
+async def delete_all_nodes(db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """Remove all nodes: tear down each node's agent, remove peers, clear DB."""
     logger.info("delete_all_nodes: clearing all nodes")
     nodes = db.query(Node).all()
@@ -105,14 +120,14 @@ async def delete_all_nodes(db: Session = Depends(get_db)):
     count = len(nodes)
     for node in nodes:
         db.delete(node)
-    log_event(db, LogEventType.NODE_REMOVED, f"All nodes cleared ({count} removed)")
+    log_event(db, LogEventType.NODE_REMOVED, f"All nodes cleared ({count} removed)", performed_by=current_user.get("sub"))
     db.commit()
     logger.info("delete_all_nodes: removed %s nodes", count)
     return {"ok": True, "removed": count}
 
 
 @router.delete("/{id}")
-async def delete_node(id: int, db: Session = Depends(get_db)):
+async def delete_node(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_auth)):
     """
     Remove a node: send remove_peer to other nodes for each active connection,
     then send remove_node to this node's agent (deletes wg0), then remove from DB.
@@ -152,7 +167,7 @@ async def delete_node(id: int, db: Session = Depends(get_db)):
         (ConnectionRequest.requester_id == id) | (ConnectionRequest.target_id == id)
     ).delete(synchronize_session=False)
     db.delete(node)
-    log_event(db, LogEventType.NODE_REMOVED, f"Node removed: {name} (id={id})")
+    log_event(db, LogEventType.NODE_REMOVED, f"Node removed: {name} (id={id})", performed_by=current_user.get("sub"))
     db.commit()
     logger.info("delete_node: removed name=%s id=%s", name, id)
     return {"ok": True}
