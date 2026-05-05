@@ -9,6 +9,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.persistence.database import get_db
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
@@ -77,7 +78,7 @@ def _decode_token(token: str, db: Session | None = None) -> dict:
 
 def require_auth(
     token: str | None = Depends(_oauth2),
-    db: Session = Depends(lambda: next(__import__("app.persistence.database", fromlist=["get_db"]).get_db())),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Dependency: enforce auth when a password hash is configured.
 

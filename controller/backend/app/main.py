@@ -45,10 +45,29 @@ def _validate_controller_config() -> None:
                 "and set VISHWAAS_JWT_SECRET in .env before running in production."
             )
             sys.exit(1)
+        if not settings.admin_password_hash:
+            logger.critical(
+                "VISHWAAS_ADMIN_PASSWORD_HASH is not set. "
+                "Auth is bypassed in dev mode — this is not safe for production. "
+                "Generate a hash: python3 -c \"from passlib.hash import bcrypt; print(bcrypt.hash('yourpassword'))\" "
+                "and set VISHWAAS_ADMIN_PASSWORD_HASH in .env."
+            )
+            sys.exit(1)
         if "*" in settings.allowed_origins:
             logger.critical(
                 "VISHWAAS_ALLOWED_ORIGINS contains '*'. "
                 "Set an explicit comma-separated list of allowed origins for production."
+            )
+            sys.exit(1)
+        _localhost_origins = [
+            o for o in settings.allowed_origins.split(",")
+            if "localhost" in o or "127.0.0.1" in o
+        ]
+        if _localhost_origins:
+            logger.critical(
+                "VISHWAAS_ALLOWED_ORIGINS contains localhost/127.0.0.1 entries in production: %s. "
+                "Set VISHWAAS_ALLOWED_ORIGINS to your actual domain(s).",
+                ", ".join(_localhost_origins),
             )
             sys.exit(1)
 
