@@ -9,8 +9,6 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.persistence.database import get_db
@@ -18,6 +16,7 @@ from app.persistence.models import JoinRequest, Node
 from app.api.schemas import RequestJoinBody, JoinRequestSchema
 from app.domain.enums import JoinRequestStatus
 from app.core.config import settings
+from app.core.rate_limiter import limiter
 from app.core.security import require_auth
 from app.services.join_service import approve_join, reject_join
 from app.services.log_notify import log_event, notify
@@ -25,9 +24,6 @@ from app.domain.enums import LogEventType, NotificationType
 
 router = APIRouter(tags=["join"])
 logger = logging.getLogger(__name__)
-
-# Rate limiter reference — picks up from app.state.limiter registered in main.py
-limiter = Limiter(key_func=get_remote_address)
 
 # Background retry when push fails so user doesn't need to click "Push VPN IP"
 PUSH_RETRY_DELAY = 5

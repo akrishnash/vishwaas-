@@ -33,7 +33,7 @@ if [ -z "$DOMAIN" ]; then
 fi
 
 JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-ADMIN_HASH=$(python3 -c "from passlib.hash import bcrypt; print(bcrypt.hash('${ADMIN_PW}'))")
+ADMIN_HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'${ADMIN_PW}', bcrypt.gensalt()).decode())")
 
 cat > "$ENV_FILE" <<EOF
 # VISHWAAS Controller — Production Environment

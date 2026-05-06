@@ -2,23 +2,23 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import bcrypt as _bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.persistence.database import get_db
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 ALGORITHM = "HS256"
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
+    # Use bcrypt directly — passlib 1.7.4 is incompatible with bcrypt >= 4.0.0.
+    return _bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def create_access_token(username: str) -> str:

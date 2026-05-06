@@ -11,12 +11,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.core.rate_limiter import limiter
 from app.core.security import require_auth
 from app.persistence.database import init_db
 from app.api.routes import join, nodes, connections, monitoring, auth as auth_routes
@@ -141,9 +141,6 @@ async def lifespan(app: FastAPI):
 
 
 _origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
-
-# Rate limiter (shared across routes via app.state.limiter)
-limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title=settings.app_name,
