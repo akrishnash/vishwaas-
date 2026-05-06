@@ -159,6 +159,7 @@ def list_join_requests(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(require_auth),
 ):
     """List join requests (newest first). Use skip/limit for pagination."""
     rows = db.query(JoinRequest).order_by(JoinRequest.requested_at.desc()).offset(skip).limit(limit).all()

@@ -178,7 +178,12 @@ def metrics():
 
 # All other routes require authentication
 _auth = [Depends(require_auth)]
-app.include_router(join.router, dependencies=_auth)
+# join.router is included WITHOUT global auth: /request-join must be public so agents
+# (which have no JWT) can POST on every startup. The approve/reject endpoints inside
+# join.router carry their own Depends(require_auth); list_join_requests is also guarded
+# at the route level. Removing the router-level wrapper prevents a production breakage
+# where agents are silently rejected with 401.
+app.include_router(join.router)
 app.include_router(nodes.router, dependencies=_auth)
 app.include_router(connections.router, dependencies=_auth)
 app.include_router(monitoring.router, dependencies=_auth)

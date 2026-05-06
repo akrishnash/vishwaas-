@@ -4,6 +4,7 @@ VISHWAAS Agent - Request authentication and authorization.
 All agent API endpoints (except /health) require X-VISHWAAS-TOKEN.
 Reject unknown IPs optional; token check is mandatory.
 """
+import hmac
 
 from fastapi import Header, Request, HTTPException, status
 
@@ -24,7 +25,7 @@ def require_master_token(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent not configured with master token",
         )
-    if not x_vishwaas_token or x_vishwaas_token != expected:
+    if not x_vishwaas_token or not hmac.compare_digest(x_vishwaas_token, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-VISHWAAS-TOKEN",
