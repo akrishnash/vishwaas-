@@ -1,0 +1,90 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{times}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{hyperref}
+\hypersetup{colorlinks=false}
+
+\begin{document}
+
+% ── Title block ──────────────────────────────────────────────────────────────
+\begin{center}
+  {\Large\bfseries Enforcing Human Oversight in WireGuard VPN Deployments:\\[4pt]
+  Design and Implementation of VISHWAAS}
+
+  \vspace{10pt}
+
+  {\normalsize
+  Anurag Krishna Sharma,\quad HariOm Prakash,\quad Anitha Naidu,\quad J Jayachandran\\[2pt]
+  \textit{NSED, Advanced Data Processing Research Institute}}
+
+  \vspace{10pt}
+  \noindent\rule{\linewidth}{0.4pt}
+\end{center}
+
+% ── Abstract ─────────────────────────────────────────────────────────────────
+\begin{center}
+  {\large\bfseries Abstract}
+\end{center}
+
+\noindent
+Managing WireGuard VPN deployments across multiple machines presents a
+persistent operational challenge. Static configuration files require manual
+editing on every node whenever the network changes, making large or dynamic
+deployments difficult to maintain. Automated peer-exchange tools such as
+Tailscale and Nebula address the operational burden but do so by removing
+human review from network access decisions entirely---nodes join and peer
+automatically, leaving no clear record of who authorised a given connection
+or when. In regulated or security-sensitive environments, this trade-off is
+unacceptable.
+
+This paper presents VISHWAAS (\textit{Sanskrit: trust}), a self-hosted
+WireGuard VPN orchestration system designed around a single invariant: no
+machine may join the network and no peer connection may become active without
+explicit administrator approval. The system enforces this principle through a
+two-tier architecture consisting of a central controller and a lightweight
+per-node agent. The controller, built on FastAPI and React, exposes a web
+dashboard through which an administrator reviews enrollment and connection
+requests, approves or rejects them, and monitors the live state of the
+network. Every decision is recorded in an append-only audit log with an event
+type, actor, and millisecond-precision timestamp. The per-node agent translates
+approved decisions into live WireGuard kernel configuration automatically,
+eliminating the need for manual SSH access or configuration file editing.
+
+The system provides three key-management strategies---agent-generated keys
+(private key never leaves the node), controller-issued keys (centralised
+generation with one-time delivery), and TPM~2.0 hardware-bound keys (private
+key stored in Non-Volatile memory, never persisted to disk)---allowing
+operators to select a security posture appropriate to their hardware and
+threat model. Two network topology modes are supported: direct mesh for small
+networks and hub-and-spoke gateway routing that reduces peer-count complexity
+from $O(n^2)$ to $O(n)$ for larger deployments.
+
+Security is enforced at two independent layers. The nginx reverse proxy
+restricts all controller management endpoints to RFC-1918 private addresses
+using a \texttt{geo} block, preventing internet exposure. The agent
+additionally enforces per-request IP allowlisting at the application layer,
+rejecting any request not originating from the registered controller address
+before token validation even runs.
+
+VISHWAAS was deployed on a three-machine internal lab network and validated
+against five design goals: explicit approval for every state transition, a
+complete audit trail, zero-touch provisioning after approval, flexible key
+security escalating to TPM hardware binding, and confirmed absence of public
+internet API exposure. The full enrollment-to-active-peer cycle completed in
+under 30 seconds under normal conditions. The primary remaining limitations
+are a single administrator account, no automated key rotation, and SQLite
+persistence; all three constitute the immediate development roadmap and have
+clear, well-understood implementation paths.
+
+\noindent\rule{\linewidth}{0.4pt}
+
+% ── Keywords ─────────────────────────────────────────────────────────────────
+\noindent\textbf{Keywords:}\quad
+WireGuard,\enspace VPN orchestration,\enspace human-in-the-loop,\enspace
+network access control,\enspace TPM~2.0,\enspace audit logging,\enspace
+FastAPI,\enspace self-hosted infrastructure
+
+\end{document}

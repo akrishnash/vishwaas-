@@ -15,6 +15,7 @@
 \usepackage{array}
 \usepackage{url}
 \usepackage{balance}
+\usepackage{placeins}
 \usepackage{tikz}
 \usetikzlibrary{shapes.geometric,shapes.misc,arrows.meta,positioning,fit,backgrounds,calc}
 
@@ -58,15 +59,13 @@
 
 \begin{document}
 
-\title{VISHWAAS: A Trust-First Distributed VPN Management System\\
-with Explicit Approval Workflows, Centralised Control, and TPM-Backed Key Security}
+\title{VISHWAAS: Approval-First VPN Orchestration with TPM Key Security }
 
 \author{
-  \IEEEauthorblockN{Anurag Krishnashankar}
+  \IEEEauthorblockN{Anurag Krishna Sharma,HariOm Prakash,Anitha Naidu, J Jayachandran }
   \IEEEauthorblockA{
-    \textit{Software Engineering} \\
-    \textit{VISHWAAS Project} \\
-    vishwaas@local
+    \textit{NSED} \\
+    \textit{Advanced Data Processing Research Institute} \\
   }
 }
 
@@ -82,15 +81,19 @@ across distributed infrastructure. VISHWAAS (\textit{Sanskrit: ``trust''}) is a
 production-ready, approval-first VPN orchestration platform built on WireGuard,
 FastAPI, and React. It enforces the invariant that \emph{no node may join the
 VPN, and no peer connection may become active, without explicit administrator
-approval}. This paper presents the system architecture, the two-tier
-controller\slash{}agent topology, the cryptographic key-management model
-(including optional TPM~2.0 hardware binding), complete lifecycle state machines
-governing join and connection flows, formal algorithm specifications for approval
-procedures, the REST API surface, the hub-and-spoke routing model for gateway
-nodes, and the comprehensive audit-logging subsystem. We evaluate the system
-against five formal design goals, analyse the security threat model, and identify
-future directions including multi-administrator RBAC, automated key rotation, and
-high-availability controller clustering.
+approval}. The system further enforces network-level isolation: the controller
+management API is restricted to RFC-1918 private networks via an nginx \texttt{geo}
+block, and the agent API additionally enforces per-request IP allowlisting so that
+only the registered controller IP may call agent endpoints. This paper presents the
+system architecture, the two-tier controller\slash{}agent topology, the layered
+access-control model, the cryptographic key-management model (including optional
+TPM~2.0 hardware binding), complete lifecycle state machines governing join and
+connection flows, formal algorithm specifications for approval procedures, the
+hub-and-spoke routing model for gateway nodes, and the
+comprehensive audit-logging subsystem. We evaluate the system against six formal
+design goals, analyse the security threat model, and identify future directions
+including mutual TLS between controller and agents, multi-administrator RBAC,
+automated key rotation, and high-availability controller clustering.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -122,9 +125,10 @@ VISHWAAS addresses these requirements through a central controller that acts as 
 gated authority: every state transition (a node joining, two peers connecting, a
 connection being terminated) requires explicit human approval and produces an
 immutable audit-log entry.  The system couples this strict approval model with a
-lightweight per-node agent that exposes a minimal HTTP API, enabling the
-controller to translate approvals directly into live WireGuard configuration
-changes without manual SSH or configuration management tools.
+lightweight per-node agent that exposes a minimal HTTP API accessible only to the
+controller, enabling the controller to translate approvals directly into live
+WireGuard configuration changes without manual SSH or configuration management
+tools.
 
 The name \textit{VISHWAAS} (Sanskrit: \textit{trust, confidence}) reflects the
 project's philosophical foundation: trust must be explicitly granted, never
@@ -145,8 +149,14 @@ assumed.
   \item A hub-and-spoke routing model with automatic IP forwarding and subnet
         advertisement, enabling scalable gateway topologies within WireGuard's
         routing model.
+  \item A layered network-access control model ensuring that neither the
+        controller management API nor the agent API is reachable from the public
+        internet: controller endpoints are restricted to RFC-1918 private
+        networks via the nginx reverse proxy; agent endpoints additionally enforce
+        per-request IP allowlisting against the configured controller address.
   \item A thorough security threat model covering token security, transport
-        security, JWT lifecycle management, and TPM-bound key storage.
+        security, JWT lifecycle management, TPM-bound key storage, and
+        network-level API isolation.
 \end{enumerate}
 
 \subsection{Paper Organisation}
@@ -156,10 +166,10 @@ Section~\ref{sec:architecture} describes the overall system architecture.
 Section~\ref{sec:lifecycle} details state machines and approval algorithms.
 Section~\ref{sec:keymanagement} covers key-management strategies.
 Section~\ref{sec:topology} describes the network topology model.
-Section~\ref{sec:api} catalogues the REST API surface.
-Section~\ref{sec:security} presents the security threat model.
+Section~\ref{sec:security} presents the security threat model, including the
+network-level API isolation model.
 Section~\ref{sec:implementation} summarises the implementation.
-Section~\ref{sec:evaluation} evaluates the system.
+Section~\ref{sec:evaluation} evaluates the system against six design goals.
 Section~\ref{sec:limitations} identifies limitations.
 Section~\ref{sec:conclusion} concludes.
 
@@ -296,7 +306,7 @@ bypassing the controller after provisioning.
 
 % ─── Join-request: agents → controller (gray dashed) ───
 \draw[{Stealth}-,  thick, gray!55, dashed] (0.8, -3.42) -- (0.8, -2.52);
-\node[font=\tiny, text=gray!60] at (2.5, -3.12) {\texttt{POST /request-join}};
+\node[font=\tiny, text=gray!60] at (2.5, -3.12) {join request};
 
 % ─── WireGuard data plane ───
 \draw[{Stealth}-{Stealth}, thick, green!55!black]
@@ -358,8 +368,15 @@ controller into WireGuard kernel system calls. Its components are:
         four states: \texttt{WAITING}, \texttt{APPROVED}, \texttt{ACTIVE},
         \texttt{ERROR}. State is persisted to \texttt{agent\_state.json} on disk
         so agent restarts do not lose state.
-  \item \textbf{Security} (\texttt{app/security.py}): Validates the
-        \texttt{X-VISHWAAS-TOKEN} header on all token-gated endpoints.
+  \item \textbf{Security} (\texttt{app/security.py}): Two-layer access control.
+        \texttt{ControllerIPMiddleware} (a Starlette \texttt{BaseHTTPMiddleware})
+        runs first: it checks the source IP of every incoming request against a
+        configured allowlist derived from \texttt{master\_url} plus an optional
+        \texttt{allowed\_controller\_ips} list. Only the health-check endpoint is
+        exempt so external monitoring tools may poll it. If the source IP is not
+        in the allowlist the middleware returns HTTP~403 before the request
+        reaches any route handler. After IP validation, \texttt{require\_master\_token}
+        validates the \texttt{X-VISHWAAS-TOKEN} header on all token-gated endpoints.
   \item \textbf{TPM} (\texttt{app/tpm.py}): Optional hardware-backed key storage
         via TPM~2.0 Non-Volatile memory indices.
   \item \textbf{Logger} (\texttt{app/logger.py}): Structured logging to both
@@ -370,26 +387,25 @@ controller into WireGuard kernel system calls. Its components are:
 
 The controller persists all state in a SQLite database with seven tables:
 
-\begin{table}[ht]
+\begin{table}[!t]
 \caption{Database Schema Summary}
 \label{tab:schema}
 \centering
 \small
-\begin{tabular}{ll}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\columnwidth}{@{}lX@{}}
 \toprule
 \textbf{Table} & \textbf{Key Columns} \\
 \midrule
-\texttt{nodes} & id, name, public\_key (unique), vpn\_ip (unique), \\
-               & agent\_url, status, is\_gateway, last\_seen \\
-\texttt{join\_requests} & id, node\_name, public\_key, agent\_url, status, \\
-                        & requested\_at \\
+\texttt{nodes} & id, name, public\_key (unique), vpn\_ip (unique), agent\_url, status, is\_gateway, last\_seen \\
+\texttt{join\_requests} & id, node\_name, public\_key, agent\_url, status, requested\_at \\
 \texttt{connection\_requests} & id, requester\_id, target\_id (FK nodes), status \\
 \texttt{connections} & id, node\_a\_id, node\_b\_id (FK nodes), status \\
 \texttt{notifications} & id, type, message, is\_read, created\_at \\
 \texttt{logs} & id, event\_type, description, performed\_by, created\_at \\
 \texttt{revoked\_tokens} & id, jti, expires\_at \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 The \texttt{logs} table is append-only by architectural convention: no service
@@ -397,6 +413,7 @@ layer method updates or deletes log entries. The \texttt{revoked\_tokens} table
 implements a JWT blacklist; expired entries are pruned at controller startup.
 
 
+\FloatBarrier
 % =============================================================================
 \section{Lifecycle State Machines}
 \label{sec:lifecycle}
@@ -410,24 +427,24 @@ join process proceeds in three phases: \emph{registration}, \emph{approval}, and
 
 \textbf{Phase 1 — Registration.} At startup the agent generates a WireGuard
 keypair idempotently (existing keys on disk are retained across restarts), detects
-its local IP, and enters the background join loop. The loop issues
-\texttt{POST /request-join} to the controller with the node name, public key, and
-advertised agent URL. If the controller finds a duplicate public key (previously
-approved node that restarted), it tears down all active connections on peer
-agents, deletes the stale node record, and creates a fresh \texttt{PENDING}
-request---requiring the administrator to re-approve. This prevents stale
-WireGuard peer entries from persisting across agent restarts.
+its local IP, and enters the background join loop. The loop submits a join request
+to the controller carrying the node name, public key, and advertised agent URL.
+If the controller finds a duplicate public key (previously approved node that
+restarted), it tears down all active connections on peer agents, deletes the stale
+node record, and creates a fresh \texttt{PENDING} request---requiring the
+administrator to re-approve. This prevents stale WireGuard peer entries from
+persisting across agent restarts.
 
 \textbf{Phase 2 — Approval.} The administrator reviews the pending request in the
 dashboard, inspects the node name, public key fingerprint, and agent URL, and
 clicks \emph{Approve}. Algorithm~\ref{alg:join_approval} specifies the atomic
 approval procedure executed by \texttt{join\_service.approve\_join\_request()}.
 
-\textbf{Phase 3 — Provisioning.} On receipt of \texttt{POST /set-vpn-address}, the
-agent calls \texttt{wireguard.provision\_interface(vpn\_ip)}, which creates or
-reconfigures the \texttt{wg0} interface, assigns the VPN IP, and brings the link
-up. After successful provisioning, the agent transitions to \texttt{ACTIVE} state
-and the join retry loop terminates.
+\textbf{Phase 3 — Provisioning.} On receipt of the provisioning command from the
+controller, the agent calls \texttt{wireguard.provision\_interface(vpn\_ip)}, which
+creates or reconfigures the \texttt{wg0} interface, assigns the VPN IP, and brings
+the link up. After successful provisioning, the agent transitions to \texttt{ACTIVE}
+state and the join retry loop terminates.
 
 % ── Algorithm 1: Join Approval ──
 \begin{algorithm}[!t]
@@ -441,11 +458,11 @@ and the join retry loop terminates.
        $\textit{vpn\_ip}$, \textsc{Approved})
 \STATE \textbf{UPDATE} $r.\textit{status} \leftarrow \textsc{Approved}$
 \STATE \textbf{APPEND} $\texttt{LOG}(\textsc{Join\_Approved},\;\textit{timestamp})$
-\STATE \textbf{async}: \texttt{POST /set-vpn-address} to $r.\textit{agent\_url}$
+\STATE \textbf{async}: Send provisioning command to $r.\textit{agent\_url}$
 \STATE \quad Retry $\leq 4$ times at 5\,s intervals on network failure
 \STATE \quad On agent ACK: \textbf{UPDATE} $\textit{node.status} \leftarrow \textsc{Active}$
 \STATE \quad On all retries exhausted: leave node in \textsc{Approved};
-       admin may retry via \texttt{POST /nodes/\{id\}/push-vpn-address}
+       admin may trigger a manual retry via the dashboard
 \end{algorithmic}
 \end{algorithm}
 
@@ -456,12 +473,12 @@ and the join retry loop terminates.
 
 \node[fc_start] (start) {Agent Startup};
 \node[fc_proc,  below=of start]  (genkey)  {Generate / Load WG Keypair};
-\node[fc_proc,  below=of genkey] (joinreq) {\texttt{POST /request-join}};
+\node[fc_proc,  below=of genkey] (joinreq) {Submit Join Request};
 \node[fc_dec,   below=0.45cm of joinreq]   (dupkey)  {Duplicate\\public key?};
 \node[fc_proc,  below=0.45cm of dupkey]    (pending) {JoinRequest $\rightarrow$ \textsc{Pending}};
 \node[fc_dec,   below=0.45cm of pending]   (appd)    {Admin\\approved?};
 \node[fc_proc,  below=0.45cm of appd]      (allocip) {Allocate VPN IP};
-\node[fc_proc,  below=of allocip]          (pushvpn) {\texttt{POST /set-vpn-address}};
+\node[fc_proc,  below=of allocip]          (pushvpn) {Send Provisioning Command};
 \node[fc_proc,  below=of pushvpn]          (provif)  {\texttt{provision\_interface()}\\Bring up \texttt{wg0}};
 \node[fc_start, below=of provif]           (active)  {Node \textsc{Active}};
 
@@ -491,7 +508,7 @@ and the join retry loop terminates.
 \draw[fc_arr] (appd.east) -- node[above, font=\tiny] {Rejected} (rej.west);
 
 \end{tikzpicture}
-\caption{Node join lifecycle. The agent retries \texttt{POST /request-join} every 10\,s
+\caption{Node join lifecycle. The agent retries the join request every 10\,s
 until approved or rejected. A duplicate public key (agent restart) triggers automatic teardown
 of the prior node before a fresh request is created, requiring administrator re-approval.}
 \label{fig:join_flow}
@@ -507,11 +524,10 @@ Rejection leads to a terminal \texttt{WAITING} state with no further retry.
 Figure~\ref{fig:conn_flow} illustrates the connection lifecycle. Two nodes may
 only be peered after explicit administrator approval.
 
-\textbf{Request.} An administrator selects two nodes and submits
-\texttt{POST /request-connection}.  The controller creates a
-\texttt{ConnectionRequest} record (status \textsc{Pending}) and logs a
-\texttt{CONNECTION\_REQUESTED} event. A second request for the same pair while
-one is already \textsc{Pending} is idempotently rejected.
+\textbf{Request.} An administrator selects two nodes and submits a connection
+request.  The controller creates a \texttt{ConnectionRequest} record (status
+\textsc{Pending}) and logs a \texttt{CONNECTION\_REQUESTED} event. A second request
+for the same pair while one is already \textsc{Pending} is idempotently rejected.
 
 \textbf{Approval.} On administrator approval, Algorithm~\ref{alg:conn_approval}
 specifies the atomic procedure executed by
@@ -519,13 +535,12 @@ specifies the atomic procedure executed by
 \emph{all-or-nothing}: if the second \texttt{add\_peer} call fails, the first is
 rolled back immediately. No half-active connections are persisted.
 
-\textbf{Termination.} An administrator terminates a connection via
-\texttt{DELETE /connections/\{id\}}.  The controller calls
-\texttt{DELETE /peer} on both agents to remove each other from the WireGuard peer
-table, then marks the \texttt{Connection} as \textsc{Terminated}.  Critically,
-the WireGuard interface (\texttt{wg0}) remains up on both nodes after termination:
-the nodes stay on the VPN with their assigned IPs, simply no longer peered with
-each other.
+\textbf{Termination.} An administrator terminates a connection via the dashboard.
+The controller sends peer-removal commands to both agents to remove each other from
+the WireGuard peer table, then marks the \texttt{Connection} as
+\textsc{Terminated}.  Critically, the WireGuard interface (\texttt{wg0}) remains
+up on both nodes after termination: the nodes stay on the VPN with their assigned
+IPs, simply no longer peered with each other.
 
 % ── Algorithm 2: Connection Approval ──
 \begin{algorithm}[!t]
@@ -536,15 +551,15 @@ each other.
 \REQUIRE Nodes $A = cr.\textit{requester}$, $B = cr.\textit{target}$; both \textsc{Active}
 \STATE Compute $\textit{aips}_A, \textit{aips}_B$ based on gateway flags
        (see Section~\ref{sec:topology})
-\STATE $r_A \leftarrow$ \texttt{POST /peer} to $A.\textit{agent\_url}$
+\STATE $r_A \leftarrow$ add-peer command to $A.\textit{agent\_url}$
        with $(B.\textit{pubkey},\; \textit{aips}_B,\; B.\textit{endpoint})$
 \IF{$r_A.\textit{error}$}
   \STATE \textbf{RETURN} HTTP~502 (no state written)
 \ENDIF
-\STATE $r_B \leftarrow$ \texttt{POST /peer} to $B.\textit{agent\_url}$
+\STATE $r_B \leftarrow$ add-peer command to $B.\textit{agent\_url}$
        with $(A.\textit{pubkey},\; \textit{aips}_A,\; A.\textit{endpoint})$
 \IF{$r_B.\textit{error}$}
-  \STATE \textbf{ROLLBACK}: \texttt{DELETE /peer} from $A.\textit{agent\_url}$
+  \STATE \textbf{ROLLBACK}: send remove-peer command to $A.\textit{agent\_url}$
          with $B.\textit{pubkey}$ \COMMENT{atomicity}
   \STATE \textbf{RETURN} HTTP~502 (no state written)
 \ENDIF
@@ -552,7 +567,7 @@ each other.
 \STATE \textbf{UPDATE} $cr.\textit{status} \leftarrow \textsc{Approved}$
 \STATE \textbf{APPEND} $\texttt{LOG}(\textsc{Connection\_Approved},\;\textit{timestamp})$
 \IF{$A.\textit{is\_gateway}$ \OR $B.\textit{is\_gateway}$}
-  \STATE \texttt{POST /ip-forward/enable} on the gateway node
+  \STATE Enable IP forwarding on the gateway node
 \ENDIF
 \end{algorithmic}
 \end{algorithm}
@@ -563,18 +578,18 @@ each other.
 \begin{tikzpicture}[node distance=0.58cm]
 
 \node[fc_start] (sel)    {Admin Selects Node A + Node B};
-\node[fc_proc,  below=of sel]    (req)    {\texttt{POST /request-connection}};
+\node[fc_proc,  below=of sel]    (req)    {Submit Connection Request};
 \node[fc_proc,  below=of req]    (pend)   {ConnectionRequest $\rightarrow$ \textsc{Pending}};
 \node[fc_proc,  below=of pend]   (appbtn) {Admin Approves};
-\node[fc_proc,  below=of appbtn] (addA)   {\texttt{POST /peer} on Agent A};
+\node[fc_proc,  below=of appbtn] (addA)   {Add Peer on Agent A};
 \node[fc_dec,   below=0.45cm of addA]     (okA)    {\texttt{add\_peer}\\success?};
-\node[fc_proc,  below=0.45cm of okA]      (addB)   {\texttt{POST /peer} on Agent B};
+\node[fc_proc,  below=0.45cm of okA]      (addB)   {Add Peer on Agent B};
 \node[fc_dec,   below=0.45cm of addB]     (okB)    {\texttt{add\_peer}\\success?};
 \node[fc_proc,  below=0.45cm of okB]      (active) {Connection $\rightarrow$ \textsc{Active}};
 
 % Termination branch
-\node[fc_proc,  below=of active] (term1) {\texttt{DELETE /connections/\{id\}}};
-\node[fc_proc,  below=of term1]  (term2) {\texttt{DELETE /peer} on A + B};
+\node[fc_proc,  below=of active] (term1) {Admin Terminates Connection};
+\node[fc_proc,  below=of term1]  (term2) {Remove Peer on A + B};
 \node[fc_start, below=of term2]  (done)  {Connection \textsc{Terminated}\\(interfaces remain UP)};
 
 % Error nodes
@@ -607,6 +622,7 @@ entries are removed.}
 \end{figure}
 
 
+\FloatBarrier
 % =============================================================================
 \section{Key Management}
 \label{sec:keymanagement}
@@ -635,8 +651,7 @@ Enabled by setting \texttt{"controller\_issues\_keys": true} in
 \texttt{agent\_config.json}.  In this mode the agent submits the join request
 with an empty public-key field; on approval, the controller generates a fresh
 WireGuard keypair, stores the public key in the \texttt{Node} record, and
-transmits the private key to the agent inside the \texttt{/set-vpn-address}
-response body. This model centralises key generation but exposes the private key
+transmits the private key to the agent inside the provisioning command response body. This model centralises key generation but exposes the private key
 in transit; it is only appropriate when the controller--agent channel is
 TLS-encrypted.
 
@@ -660,7 +675,7 @@ exfiltration does not yield the WireGuard private key. If the TPM is unavailable
 the system falls back to disk-based access and logs a warning, preserving
 availability at the cost of the hardware-binding property.
 
-\begin{table}[ht]
+\begin{table}[!t]
 \caption{Key Management Strategy Comparison}
 \label{tab:keymanagement}
 \centering
@@ -680,6 +695,7 @@ Recommended use         & General & Dev/test & High-sec \\
 \end{table}
 
 
+\FloatBarrier
 % =============================================================================
 \section{Network Topology Model}
 \label{sec:topology}
@@ -705,9 +721,9 @@ When a connection between spoke node~$S$ and gateway node~$G$ is approved:
         peer~$G$, routing \emph{all} VPN traffic through~$G$.
   \item \textbf{Gateway~$G$} receives \texttt{allowed-ips}~$= S.\textit{vpn\_ip}/32$
         for peer~$S$.
-  \item The controller enables kernel IP forwarding on~$G$ via
-        \texttt{POST /ip-forward/enable} $\Rightarrow$ \texttt{sysctl -w
-        net.ipv4.ip\_forward=1}.
+  \item The controller enables kernel IP forwarding on~$G$ by sending an
+        enable-forwarding command to the agent, which executes
+        \texttt{sysctl -w net.ipv4.ip\_forward=1}.
 \end{itemize}
 
 This topology reduces the peer count from $O(n^2)$ (mesh) to $O(n)$, making it
@@ -729,123 +745,15 @@ topologies. This computation is the core of \texttt{connection\_service}:
 
 \subsection{Topology Visualisation}
 
-The \texttt{GET /topology} endpoint returns a graph representation consumed by the
-React dashboard, which renders it using \texttt{react-force-graph-2d}---a
+The controller maintains a live graph representation of the active network, consumed
+by the React dashboard and rendered using \texttt{react-force-graph-2d}---a
 physics-based force-directed layout that positions gateway nodes as visually
-prominent hubs and spoke nodes as satellites:
-
-\begin{lstlisting}[caption={Topology API response (abbreviated)}]
-{
-  "nodes": [
-    { "id": 1, "name": "gw-1", "vpn_ip": "10.10.10.2",
-      "status": "ACTIVE", "is_gateway": true },
-    { "id": 2, "name": "node-a", "vpn_ip": "10.10.10.3",
-      "status": "ACTIVE", "is_gateway": false }
-  ],
-  "edges": [
-    { "id": 1, "source_id": 2, "target_id": 1,
-      "status": "ACTIVE" }
-  ]
-}
-\end{lstlisting}
+prominent hubs and spoke nodes as satellites. The graph is computed exclusively
+from \textsc{Active} and \textsc{Approved} nodes; \textsc{Offline} and deleted
+nodes are excluded so the network map always reflects operational reality.
 
 
-% =============================================================================
-\section{REST API Surface}
-\label{sec:api}
-% =============================================================================
-
-\subsection{Controller API}
-
-The controller exposes a comprehensive REST API on port~8000. All endpoints except
-\texttt{POST /request-join} and \texttt{GET /health} require a valid JWT Bearer
-token when authentication is enabled. Table~\ref{tab:controller-api} summarises
-the primary endpoints.
-
-\begin{table}[ht]
-\caption{Controller REST API Surface (Selected Endpoints)}
-\label{tab:controller-api}
-\centering
-\small
-\begin{tabularx}{\columnwidth}{lX}
-\toprule
-\textbf{Method + Path} & \textbf{Description} \\
-\midrule
-POST /request-join & Agent submits join request (tokenless) \\
-GET /join-requests & List requests, filterable by status \\
-POST /join-requests/\{id\}/approve & Admin approves join \\
-POST /join-requests/\{id\}/reject & Admin rejects join \\
-\midrule
-GET /nodes & List all nodes with pagination \\
-GET /nodes/\{id\} & Node detail with WireGuard stats \\
-PATCH /nodes/\{id\} & Update agent\_url or name \\
-POST /nodes/\{id\}/push-vpn-address & Retry VPN address push \\
-POST /nodes/\{id\}/set-gateway & Mark node as hub \\
-DELETE /nodes/\{id\} & Remove node and teardown connections \\
-\midrule
-POST /request-connection & Request peer connection \\
-POST /connection-requests/\{id\}/approve & Approve and activate peers \\
-DELETE /connections/\{id\} & Terminate connection \\
-\midrule
-GET /stats & Dashboard summary counts \\
-GET /stats/detailed & Per-node WireGuard bandwidth \\
-GET /logs & Audit log (filterable by event type) \\
-GET /topology & Graph nodes + edges \\
-GET /notifications & Unread admin notifications \\
-GET /health & Liveness probe \\
-GET /ready & Readiness probe (DB connectivity check) \\
-GET /metrics & Prometheus metrics endpoint \\
-\midrule
-POST /auth/login & Obtain JWT token \\
-POST /auth/logout & Revoke JWT (add jti to blacklist) \\
-GET /auth/me & Validate current session \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-\subsection{Agent API}
-
-The agent exposes a minimal API on port~9000. All endpoints except
-\texttt{GET /health} require the \texttt{X-VISHWAAS-TOKEN} header.
-
-\begin{table}[ht]
-\caption{Agent REST API Surface}
-\label{tab:agent-api}
-\centering
-\small
-\begin{tabularx}{\columnwidth}{lX}
-\toprule
-\textbf{Method + Path} & \textbf{Description} \\
-\midrule
-GET /health & Liveness check; returns agent state, wg interface stats \\
-POST /set-vpn-address & Provision WireGuard interface with assigned IP \\
-POST /peer & Add or update a WireGuard peer \\
-DELETE /peer & Remove a WireGuard peer by public key \\
-POST /wg/start & Bring WireGuard interface up \\
-POST /wg/stop & Bring WireGuard interface down \\
-GET /wg/status & Return current WireGuard interface stats \\
-POST /ip-forward/enable & Enable kernel IPv4 forwarding \\
-POST /remove-node & Full teardown (remove all peers, down interface) \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-\subsection{Uniform Response Envelope}
-
-Both controller and agent return a consistent JSON envelope:
-
-\begin{lstlisting}[caption={Unified response envelope}]
-{ "success": true | false,
-  "message": "Human-readable summary",
-  "detail": "Optional debug info or null" }
-\end{lstlisting}
-
-HTTP status codes follow REST conventions: 200 for success, 400 for bad request,
-401 for missing/invalid token, 404 for absent resource, 409 for conflict, 422
-for Pydantic validation failures, 502 when the controller cannot reach an agent,
-and 503 when configuration is missing.
-
-
+\FloatBarrier
 % =============================================================================
 \section{Security Analysis}
 \label{sec:security}
@@ -874,19 +782,50 @@ protection.
 \textbf{Dashboard (Administrator UI).} Authentication is controlled by the
 \texttt{VISHWAAS\_ADMIN\_PASSWORD\_HASH} environment variable. When set, the
 frontend obtains a JWT (HS256, configurable expiry defaulting to 480 minutes) via
-\texttt{POST /auth/login}. The JWT carries a \texttt{jti} claim; logout adds the
+the authentication endpoint. The JWT carries a \texttt{jti} claim; logout adds the
 \texttt{jti} to the \texttt{revoked\_tokens} table, blacklisting the token for its
 remaining validity period. Expired blacklist entries are pruned at controller
 startup.
 
+\subsection{Network-Level API Isolation}
+\label{sec:isolation}
+
+VISHWAAS enforces two independent network-level restrictions to ensure that neither
+API surface is reachable from the public internet.
+
+\textbf{Controller API (nginx layer).}
+The nginx reverse proxy classifies every client IP using a \texttt{geo
+\$private\_network} block: RFC-1918 private addresses (\texttt{10.0.0.0/8},
+\texttt{172.16.0.0/12}, \texttt{192.168.0.0/16}) and loopback are classified as
+private ($= 1$); all other addresses are classified as public ($= 0$). Any request
+where \texttt{\$private\_network = 0} is rejected with HTTP~403 \emph{before}
+reaching the application server. Only the liveness and readiness probe endpoints
+remain fully public, as required by load-balancer and uptime-monitoring
+integrations. Additional admin IP ranges (e.g.\ a specific external admin workstation)
+can be added to the \texttt{geo} block without application changes.
+
+\textbf{Agent API (application layer).}
+The agent registers \texttt{ControllerIPMiddleware} as a Starlette middleware at
+application startup. For every request it extracts the client IP from
+\texttt{request.client.host} and compares it against the allowlist constructed by
+\texttt{get\_allowed\_controller\_ips()}: the IP parsed from \texttt{master\_url}
+(the controller hostname), loopback addresses, and any extras in
+\texttt{allowed\_controller\_ips} in \texttt{agent\_config.json}. Requests from
+unlisted IPs are rejected with HTTP~403 and logged as suspicious before any token
+check occurs. Only the health-check endpoint is exempt. Because the controller is the
+only legitimate caller of the agent API, this reduces the attack surface for
+token-brute-force and replay attacks to zero from any external host.
+
 \subsection{Transport Security}
 \label{sec:transport}
 
-VISHWAAS delegates transport security to the deployment environment. The
+VISHWAAS delegates transport encryption to the deployment environment. The
 recommended production deployment places an nginx reverse proxy with TLS in front
-of the controller API and serves agent URLs over HTTPS. Without TLS, the
-\texttt{X-VISHWAAS-TOKEN}, JWT tokens, and (in controller-issued-key mode)
-WireGuard private keys are transmitted in plaintext.
+of the controller API. Without TLS, the \texttt{X-VISHWAAS-TOKEN}, JWT tokens,
+and (in controller-issued-key mode) WireGuard private keys are transmitted in
+plaintext; TLS is therefore a hard requirement in production. The network-level
+isolation described in Section~\ref{sec:isolation} provides defence-in-depth even
+before TLS is terminated.
 
 \subsection{Heartbeat and Liveness}
 
@@ -904,7 +843,7 @@ startup sweep runs one immediate pass at controller boot, marking unreachable no
 Table~\ref{tab:threats} enumerates the primary threats, their risk levels under a
 default HTTP deployment, and the available mitigations.
 
-\begin{table}[ht]
+\begin{table}[!t]
 \caption{Threat Model Summary}
 \label{tab:threats}
 \centering
@@ -913,16 +852,19 @@ default HTTP deployment, and the available mitigations.
 \toprule
 \textbf{Threat} & \textbf{Risk} & \textbf{Mit.} & \textbf{Mitigation} \\
 \midrule
-Rogue agent join         & Med  & Partial & Admin approval gate \\
-MITM controller--agent   & High & No (HTTP) & Use HTTPS/TLS \\
-Stolen agent token       & High & No      & Rotate token, use HTTPS \\
-Private key exfiltration & Med  & Partial & TPM binding \\
-JWT theft (localStorage) & Med  & Partial & HTTPS, short expiry, \texttt{jti} blacklist \\
-SQL injection            & Low  & Yes     & SQLAlchemy ORM \\
-XSS in dashboard         & Med  & Partial & React auto-escaping \\
-Replay on agent API      & Med  & No      & Add nonce/timestamp \\
-VPN IP pool exhaustion   & Low  & Yes     & Sequential allocation check \\
-Rogue admin action       & Low  & Partial & Immutable audit log \\
+Rogue agent join            & Med  & Partial & Admin approval gate \\
+Controller API exposed      & High & Yes     & nginx geo block: RFC-1918 only \\
+Agent API exposed           & High & Yes     & \texttt{ControllerIPMiddleware}: controller IP only \\
+MITM controller--agent      & High & Partial & TLS (nginx); IP isolation reduces exposure \\
+Stolen agent token          & High & Partial & IP allowlist limits token usefulness from internet \\
+Private key exfiltration    & Med  & Partial & TPM binding \\
+JWT theft (localStorage)    & Med  & Partial & HTTPS, short expiry, \texttt{jti} blacklist \\
+SQL injection               & Low  & Yes     & SQLAlchemy ORM \\
+XSS in dashboard            & Med  & Partial & React auto-escaping \\
+CORS wildcard               & Med  & Yes     & Production startup guard aborts if \texttt{*} set \\
+Replay on agent API         & Med  & Partial & IP isolation reduces replay attack surface \\
+VPN IP pool exhaustion      & Low  & Yes     & Sequential allocation check \\
+Rogue admin action          & Low  & Partial & Immutable audit log \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -942,6 +884,7 @@ an external append-only log store (e.g., a Merkle-tree-based audit log) would be
 required; this is identified as future work.
 
 
+\FloatBarrier
 % =============================================================================
 \section{Implementation}
 \label{sec:implementation}
@@ -971,14 +914,17 @@ iconography, React Context API for global state management.
 The recommended production deployment installs the agent as a systemd service at
 \texttt{/opt/vishwaas-agent} via \texttt{install.sh}, enabling automatic start on
 boot and restart on failure. The controller runs behind an nginx reverse proxy
-configured for HTTPS, rate limiting, and restriction of the \texttt{/metrics}
-endpoint to the VPN subnet. Database schema is managed by Alembic migrations;
-existing deployments run \texttt{alembic stamp head} once to baseline before
-upgrading.
+configured for HTTPS, rate limiting, and a \texttt{geo \$private\_network} block
+that restricts all management API endpoints to RFC-1918 private addresses. The
+Prometheus metrics endpoint is further restricted to localhost and the VPN subnet.
+Agents are configured with \texttt{master\_url} pointing to the controller;
+\texttt{ControllerIPMiddleware} derives the allowed IP from this URL automatically.
+Database schema is managed by Alembic migrations; existing deployments run
+\texttt{alembic stamp head} once to baseline before upgrading.
 
 \subsection{Codebase Metrics}
 
-\begin{table}[ht]
+\begin{table}[!t]
 \caption{Codebase Size Summary}
 \label{tab:codebase}
 \centering
@@ -997,6 +943,7 @@ Scripts \& config  & 10 & $\sim$300 \\
 \end{table}
 
 
+\FloatBarrier
 % =============================================================================
 \section{Evaluation}
 \label{sec:evaluation}
@@ -1032,6 +979,13 @@ gateway-mediated networks. The topology API and force-graph visualisation enable
 administrators to manage hundreds of nodes. \textit{Met for gateway topologies;
 mesh topology has inherent $O(n^2)$ scaling.}
 
+\textbf{G6 — No Public API Exposure.} Neither the controller management API nor the
+agent API is reachable from the public internet without explicit operator override.
+The nginx \texttt{geo \$private\_network} block enforces RFC-1918-only access at
+the proxy layer; the agent \texttt{ControllerIPMiddleware} enforces controller-only
+access at the application layer. \textit{Met. Residual gaps (IP spoofing, no mTLS)
+are identified in Section~\ref{sec:limitations} with clear mitigations.}
+
 
 % =============================================================================
 \section{Limitations and Future Work}
@@ -1053,14 +1007,18 @@ mesh topology has inherent $O(n^2)$ scaling.}
         operating unaffected.
   \item \textbf{IPv4 Only.} VPN addressing and routing are hardcoded to IPv4.
         IPv6 dual-stack is not supported.
-  \item \textbf{No Mutual TLS.} Agent authentication relies on a shared token.
-        A compromised token grants full control over all agents.
-  \item \textbf{No Replay Protection on Agent API.} The
-        \texttt{X-VISHWAAS-TOKEN} header provides authentication but not message
-        freshness. A captured valid request could be replayed.
-  \item \textbf{CORS Wildcard.} The controller sets
-        \texttt{allow\_origins=["*"]} by default. This must be restricted for
-        internet-facing controllers via \texttt{VISHWAAS\_ALLOWED\_ORIGINS}.
+  \item \textbf{No Mutual TLS.} Agent authentication combines an IP allowlist
+        and a shared \texttt{X-VISHWAAS-TOKEN}. A token compromised by an
+        on-path attacker on the management LAN would still be bounded by the IP
+        allowlist; however, mTLS would remove the shared-secret dependency entirely.
+  \item \textbf{Replay Protection Partial.} The IP allowlist eliminates replay
+        attacks from external hosts; replays from the controller host itself (e.g.,
+        a compromised controller) remain possible without per-message nonces or
+        timestamps.
+  \item \textbf{IP Spoofing at Layer~3.} The \texttt{ControllerIPMiddleware}
+        trusts \texttt{request.client.host} which reflects the TCP source address.
+        On the same LAN, IP spoofing is non-trivial but theoretically possible;
+        mTLS or HMAC-signed request bodies would close this residual gap.
 \end{enumerate}
 
 \subsection{Future Work}
@@ -1082,9 +1040,12 @@ mesh topology has inherent $O(n^2)$ scaling.}
   \item \textbf{Webhook Notifications.} Push approval events and node-status
         changes to configurable webhook URLs (Slack, Teams, PagerDuty) to
         integrate into NOC workflows.
-  \item \textbf{Replay Protection.} Add a timestamp and nonce to
-        controller$\rightarrow$agent requests with a short validity window to
-        prevent replay attacks.
+  \item \textbf{Mutual TLS.} Replace the shared-token + IP-allowlist model with
+        per-node client certificates issued by a controller CA. This eliminates
+        the shared-secret and provides cryptographic, non-spoofable agent identity.
+  \item \textbf{Full Replay Protection.} Add a timestamp and HMAC-signed nonce to
+        controller$\rightarrow$agent requests with a short validity window,
+        eliminating the residual replay risk from same-host attackers.
   \item \textbf{IPv6 Dual-Stack.} Extend the VPN addressing scheme to support
         IPv6 prefixes and dual-stack nodes.
   \item \textbf{Cryptographic Audit Log.} Integrate a Merkle-tree-based
@@ -1120,11 +1081,15 @@ provides the routing scalability needed for real enterprise deployments without
 sacrificing the approval-per-connection invariant.
 
 VISHWAAS is a mature foundation for organisations wishing to deploy WireGuard-based
-VPNs under strict operational discipline. Its primary gaps---single-admin, no key
-rotation, SQLite persistence---are well-understood engineering problems with clear
-solutions identified in the future-work roadmap. The core approval-workflow and
-audit-logging infrastructure, the system's most distinctive contribution, is
-complete and production-ready.
+VPNs under strict operational discipline. The system enforces a layered security
+posture: neither the controller management API nor the agent API is reachable from
+the public internet---the nginx \texttt{geo} block enforces RFC-1918-only access to
+the controller, and the agent's \texttt{ControllerIPMiddleware} further restricts
+calls to the controller's registered IP address. Its primary remaining gaps---single-admin,
+no key rotation, SQLite persistence---are well-understood engineering problems with
+clear solutions identified in the future-work roadmap. The core approval-workflow,
+audit-logging infrastructure, and network-isolation model, the system's most
+distinctive contributions, are complete and production-ready.
 
 % =============================================================================
 \section*{Acknowledgements}
