@@ -535,22 +535,21 @@ vishwaas/
 │                         SECURITY LAYERS                                       │
 │                                                                               │
 │  Layer 1: Network perimeter (nginx.conf)                                     │
-│  ────────────────────────────────────────────────────────────────────────   │
-│  • RFC-1918 private IP check (geo module)                                    │
-│  • All /api/* management endpoints: 403 for public internet IPs              │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  • allow/deny directives — RFC-1918 + localhost only for /api/*              │
 │  • /api/health and /api/ready: public (load balancer probes)                 │
 │  • /metrics: restricted to VPN subnet (10.10.10.0/24)                       │
-│  • Rate limiting at nginx level (10r/s burst 20)                             │
+│  • Rate limiting zones defined in http context (10r/m join, 20r/m auth)     │
 │                                                                               │
-│  Layer 2: Agent IP whitelist (ControllerIPMiddleware)                        │
-│  ────────────────────────────────────────────────────────────────────────   │
+│  Layer 2: Agent IP allowlist (ControllerIPMiddleware)                        │
+│  ─────────────────────────────────────────────────────────────────────────  │
 │  • Every request to the agent (except /health) checked against               │
 │    controller's IP (parsed from master_url in config)                        │
-│  • 403 if source IP doesn't match                                            │
+│  • 403 if source IP doesn't match; suspicious IP is logged                  │
 │  • 127.0.0.1 and ::1 always allowed (same-machine deployments)              │
 │                                                                               │
 │  Layer 3: Controller API authentication (JWT)                                │
-│  ────────────────────────────────────────────────────────────────────────   │
+│  ─────────────────────────────────────────────────────────────────────────  │
 │  • Dashboard login → POST /auth/login → JWT token (HS256)                   │
 │  • JWT contains: sub (username), exp (expiry), jti (unique ID)              │
 │  • All routes except /auth/*, /health, /ready, /metrics require JWT         │
@@ -558,22 +557,31 @@ vishwaas/
 │  • On startup: prune expired entries from revoked_tokens                    │
 │  • Production: refuses to start with default JWT secret                     │
 │                                                                               │
-│  Layer 4: Controller → Agent authentication (shared token)                  │
-│  ────────────────────────────────────────────────────────────────────────   │
-│  • VISHWAAS_AGENT_TOKEN (set on controller)                                  │
-│  • master_token (set on each agent, must match)                              │
-│  • Every call controller makes to agent: X-VISHWAAS-TOKEN header            │
-│  • Agent rejects (401) any request without valid token                      │
+│  Layer 4: Controller → Agent authentication (per-node tokens)               │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  • On each node approval, controller generates secrets.token_hex(32)        │
+│  • Token pushed to agent via set-vpn-address, stored at keys_dir/           │
+│    agent_token.txt (chmod 600)                                              │
+│  • All subsequent controller→agent calls use this per-node token            │
+│  • Fallback to shared VISHWAAS_AGENT_TOKEN for pre-existing nodes           │
+│  • Agent validates via hmac.compare_digest (timing-safe)                    │
 │                                                                               │
-│  Layer 5: Input validation                                                   │
-│  ────────────────────────────────────────────────────────────────────────   │
-│  • node_name: pattern check (alphanumeric + hyphen/underscore)               │
-│  • public_key: WireGuard base64 format validated                             │
+│  Layer 5: Transport security (optional TLS)                                  │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  • Agent: set tls_cert_file + tls_key_file → uvicorn serves HTTPS           │
+│  • Controller: VISHWAAS_AGENT_CA_CERT → httpx verifies agent cert           │
+│  • Without TLS: management plane is HTTP (acceptable on trusted LAN)        │
+│                                                                               │
+│  Layer 6: Input validation + body size limits                               │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  • Pydantic-typed request bodies on all agent API endpoints                  │
+│  • WireGuard base64 public key validated (must decode to 32 bytes)          │
 │  • agent_url: must use http:// or https:// scheme                           │
+│  • Request body limit: 64 KB (agent) / 256 KB (controller)                 │
 │  • Rate limit: 10 join requests per minute per IP                           │
 │                                                                               │
-│  Layer 6: Private key protection                                             │
-│  ────────────────────────────────────────────────────────────────────────   │
+│  Layer 7: Private key protection                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
 │  • Private key generated locally on agent machine                           │
 │  • Stored in keys_dir (chmod 600)                                           │
 │  • NEVER exposed via any API endpoint                                       │
@@ -922,14 +930,15 @@ vishwaas/
 ### Controller (`controller/backend/.env`)
 
 ```env
-VISHWAAS_AGENT_TOKEN=<shared secret — must match agent master_token>
+VISHWAAS_AGENT_TOKEN=<fallback shared secret — per-node tokens issued on approval>
 VISHWAAS_JWT_SECRET=<32+ char random hex>
 VISHWAAS_ADMIN_PASSWORD_HASH=<bcrypt hash>  # empty = dev mode (accept any login)
 VISHWAAS_ENVIRONMENT=development            # or "production"
 VISHWAAS_ALLOWED_ORIGINS=http://localhost:3000
-VISHWAAS_VPN_NETWORK=10.10.10.0/24
-VISHWAAS_VPN_START=10.10.10.2
-VISHWAAS_VPN_END=10.10.10.254
+VISHWAAS_VPN_NETWORK=10.10.10
+VISHWAAS_VPN_START=2
+VISHWAAS_VPN_END=254
+VISHWAAS_AGENT_CA_CERT=                     # path to CA PEM for agent TLS verification
 VISHWAAS_LOG_JSON=false
 VISHWAAS_JWT_EXPIRE_MINUTES=480
 VISHWAAS_LOG_RETENTION_DAYS=30
@@ -947,7 +956,9 @@ VISHWAAS_LOG_RETENTION_DAYS=30
   "listen_port": 51820,
   "keys_dir": "./keys",
   "use_tpm_wg_key": false,
-  "allowed_controller_ips": []
+  "allowed_controller_ips": [],
+  "tls_cert_file": "",
+  "tls_key_file": ""
 }
 ```
 
@@ -1063,16 +1074,32 @@ After full setup:
 
 ---
 
-## 27. Known Limitations and Future Work
+## 27. Production Hardening — What Was Fixed
+
+Recent round of improvements to make the system production-worthy:
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | Shared agent token — one leaked token compromises all nodes | Per-node token generated with `secrets.token_hex(32)` on each approval; stored at `keys_dir/agent_token.txt` (chmod 600) |
+| 2 | No TLS on management plane | Agent now supports HTTPS via `tls_cert_file`/`tls_key_file`; controller httpx client uses `VISHWAAS_AGENT_CA_CERT` for verification |
+| 3 | Agent config cache never reloaded without restart | Replaced function-attribute cache with module-level var + `reload_config()` |
+| 4 | `dict[str, Any]` on agent endpoints — no schema validation | Pydantic models for all agent endpoints; WireGuard public key validated to 32-byte base64 |
+| 5 | No request body size limits | `BodySizeLimitMiddleware` — 64 KB on agent, 256 KB on controller |
+| 6 | nginx `if` blocks (known anti-pattern) | Replaced with `allow`/`deny` directives; `limit_req_zone` moved to correct `http` context |
+| 7 | SQLite in production with no warning | Startup warning logged when SQLite detected in `production` environment |
+
+---
+
+## 28. Known Limitations and Future Work
 
 | Limitation | Current workaround | Proper fix |
 |------------|-------------------|------------|
 | No real-time push to dashboard | Frontend polls every few seconds | WebSocket / SSE |
 | Single admin account | Dev mode: no creds; Prod mode: one bcrypt hash | Multi-user auth + roles |
-| SQLite | Fine for <50 nodes | Switch VISHWAAS_DATABASE_URL to Postgres |
-| No TLS between controller and agents | Trust LAN; use VPN for management plane | nginx TLS on agent or mTLS |
+| SQLite | Fine for <50 nodes; warning logged in production | Switch `VISHWAAS_DATABASE_URL` to PostgreSQL |
+| TLS on management plane is optional | Enable via `tls_cert_file`/`tls_key_file` | Make TLS mandatory in production mode |
 | Manual `alembic stamp head` on existing DBs | One-time step | Auto-detect and stamp |
-| agent_config.json hand-configured | deploy-agent.sh SSH script | GUI or Ansible playbook |
+| `agent_config.json` hand-configured | `deploy-agent.sh` SSH script | GUI or Ansible playbook |
 | WireGuard UDP 51820 must be open between nodes | Document in setup guide | STUN/NAT traversal |
 
 ---
@@ -1090,7 +1117,8 @@ After full setup:
 | **PENDING** | Waiting for admin decision |
 | **ACTIVE** | Running normally, reachable by heartbeat |
 | **OFFLINE** | Unreachable for >90s; not yet deleted |
-| **X-VISHWAAS-TOKEN** | Shared secret header used by controller when calling agents |
+| **X-VISHWAAS-TOKEN** | Per-node secret header used by controller when calling agents (falls back to shared token for pre-migration nodes) |
+| **agent_token** | Per-node secret stored in `keys_dir/agent_token.txt`; issued by controller on first approval |
 | **jti** | JWT ID — unique per token, stored in revoked_tokens on logout |
 | **Heartbeat** | Background task that pings all nodes every 60s to check liveness |
 | **Alembic** | SQLAlchemy migration tool — manages DB schema changes safely |

@@ -42,7 +42,7 @@ async def push_vpn_address(id: int, db: Session = Depends(get_db)):
         logger.warning("push-vpn-address: node_id=%s not found", id)
         raise HTTPException(status_code=404, detail="Node not found")
     logger.info("push-vpn-address: node_id=%s name=%s agent_url=%s vpn_ip=%s", id, node.name, node.agent_url, node.vpn_ip)
-    ok = await set_vpn_address(node.agent_url, node.vpn_ip)
+    ok = await set_vpn_address(node.agent_url, node.vpn_ip, token=node.agent_token)
     if not ok:
         logger.warning("push-vpn-address: set_vpn_address failed for node_id=%s agent_url=%s", id, node.agent_url)
         raise HTTPException(
@@ -101,7 +101,7 @@ async def get_node_logs(id: int, n: int = Query(default=200, ge=1, le=1000), db:
         raise HTTPException(status_code=404, detail="Node not found")
     if not node.agent_url:
         raise HTTPException(status_code=400, detail="Node has no agent URL")
-    data = await get_agent_logs(node.agent_url, n=n)
+    data = await get_agent_logs(node.agent_url, n=n, token=node.agent_token)
     if data is None:
         raise HTTPException(status_code=502, detail="Agent unreachable or no log file yet")
     return data
@@ -114,7 +114,7 @@ async def delete_all_nodes(db: Session = Depends(get_db), current_user: dict = D
     nodes = db.query(Node).all()
     for node in nodes:
         if node.agent_url:
-            await remove_node(node.agent_url)
+            await remove_node(node.agent_url, token=node.agent_token)
     db.query(Connection).delete(synchronize_session=False)
     db.query(ConnectionRequest).delete(synchronize_session=False)
     count = len(nodes)
@@ -154,11 +154,11 @@ async def delete_node(id: int, db: Session = Depends(get_db), current_user: dict
         other_id = conn.node_b_id if conn.node_a_id == id else conn.node_a_id
         other = db.query(Node).filter(Node.id == other_id).first()
         if other and other.agent_url:
-            await remove_peer(other.agent_url, node.public_key)
+            await remove_peer(other.agent_url, node.public_key, token=other.agent_token)
             logger.info("delete_node: removed peer from other node %s for connection %s", other.name, conn.id)
     # Tell this node's agent to remove interface and clean up
     if node.agent_url:
-        await remove_node(node.agent_url)
+        await remove_node(node.agent_url, token=node.agent_token)
     # Delete connections and connection requests that reference this node, then the node
     db.query(Connection).filter(
         (Connection.node_a_id == id) | (Connection.node_b_id == id)

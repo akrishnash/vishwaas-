@@ -77,7 +77,7 @@ async def get_stats_detailed(db: Session = Depends(get_db)):
 
     async def fetch_one(n: Node) -> NodeStatsSchema:
         async with _STATS_SEMAPHORE:
-            wg = await fetch_wg_status(n.agent_url, timeout=3.0)
+            wg = await fetch_wg_status(n.agent_url, timeout=3.0, token=n.agent_token)
         if wg and wg.get("success"):
             peers = [
                 PeerStatsSchema(

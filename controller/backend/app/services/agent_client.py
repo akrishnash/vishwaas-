@@ -23,11 +23,12 @@ logger = logging.getLogger(__name__)
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _agent_headers() -> dict[str, str]:
-    """Build headers for agent requests."""
+def _agent_headers(token: str | None = None) -> dict[str, str]:
+    """Build headers for agent requests. Uses per-node token when provided, else shared token."""
     h: dict[str, str] = {"Content-Type": "application/json"}
-    if settings.agent_token:
-        h["X-VISHWAAS-TOKEN"] = settings.agent_token
+    tok = token or settings.agent_token
+    if tok:
+        h["X-VISHWAAS-TOKEN"] = tok
     try:
         from app.core.correlation import get_correlation_id
         cid = get_correlation_id()
@@ -98,6 +99,7 @@ async def add_peer(
     peer_endpoint: Optional[str] = None,
     allowed_ips: Optional[str] = None,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Call agent to add / update a WireGuard peer. Returns True on success."""
     url = f"{agent_base_url.rstrip('/')}/peer"
@@ -117,7 +119,7 @@ async def add_peer(
 
     async def _do():
         client = _get_client()
-        return await client.post(url, json=payload, headers=_agent_headers(), timeout=_t)
+        return await client.post(url, json=payload, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)
@@ -139,18 +141,22 @@ async def set_vpn_address(
     vpn_ip: str,
     private_key: Optional[str] = None,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
+    agent_token: Optional[str] = None,
 ) -> bool:
-    """Tell the agent its assigned VPN IP (and optional private key)."""
+    """Tell the agent its assigned VPN IP (and optional private key / per-agent token)."""
     url = f"{agent_base_url.rstrip('/')}/set-vpn-address"
     payload: dict = {"vpn_ip": vpn_ip}
     if private_key:
         payload["private_key"] = private_key
+    if agent_token:
+        payload["agent_token"] = agent_token
     _t = timeout if timeout is not None else settings.agent_timeout
-    logger.info("agent_client set_vpn_address: url=%s vpn_ip=%s has_key=%s", url, vpn_ip, bool(private_key))
+    logger.info("agent_client set_vpn_address: url=%s vpn_ip=%s has_key=%s has_agent_token=%s", url, vpn_ip, bool(private_key), bool(agent_token))
 
     async def _do():
         client = _get_client()
-        return await client.post(url, json=payload, headers=_agent_headers(), timeout=_t)
+        return await client.post(url, json=payload, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)
@@ -171,6 +177,7 @@ async def remove_peer(
     agent_base_url: str,
     peer_public_key: str,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Call agent to remove a peer by public key. Idempotent."""
     url = f"{agent_base_url.rstrip('/')}/peer"
@@ -181,7 +188,7 @@ async def remove_peer(
     async def _do():
         client = _get_client()
         return await client.request(
-            "DELETE", url, json={"public_key": peer_public_key}, headers=_agent_headers(), timeout=_t
+            "DELETE", url, json={"public_key": peer_public_key}, headers=_agent_headers(token), timeout=_t
         )
 
     try:
@@ -202,6 +209,7 @@ async def remove_peer(
 async def remove_node(
     agent_base_url: str,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Tell the agent to remove its WireGuard interface and clean up."""
     url = f"{agent_base_url.rstrip('/')}/remove-node"
@@ -210,7 +218,7 @@ async def remove_node(
 
     async def _do():
         client = _get_client()
-        return await client.post(url, json={}, headers=_agent_headers(), timeout=_t)
+        return await client.post(url, json={}, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)
@@ -230,6 +238,7 @@ async def remove_node(
 async def fetch_wg_status(
     agent_base_url: str,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> Optional[dict]:
     """Fetch WireGuard status from agent. Returns parsed JSON or None."""
     url = f"{agent_base_url.rstrip('/')}/wg/status"
@@ -237,7 +246,7 @@ async def fetch_wg_status(
 
     async def _do():
         client = _get_client()
-        return await client.get(url, headers=_agent_headers(), timeout=_t)
+        return await client.get(url, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)
@@ -255,6 +264,7 @@ async def fetch_wg_status(
 async def enable_ip_forward(
     agent_base_url: str,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Tell agent to enable IPv4 forwarding (hub/gateway nodes)."""
     url = f"{agent_base_url.rstrip('/')}/ip-forward/enable"
@@ -263,7 +273,7 @@ async def enable_ip_forward(
 
     async def _do():
         client = _get_client()
-        return await client.post(url, json={}, headers=_agent_headers(), timeout=_t)
+        return await client.post(url, json={}, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)
@@ -284,6 +294,7 @@ async def get_agent_logs(
     agent_base_url: str,
     n: int = 200,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> Optional[dict]:
     """Fetch last N log lines from agent. Returns parsed JSON or None."""
     url = f"{agent_base_url.rstrip('/')}/logs"
@@ -291,7 +302,7 @@ async def get_agent_logs(
 
     async def _do():
         client = _get_client()
-        return await client.get(url, params={"n": n}, headers=_agent_headers(), timeout=_t)
+        return await client.get(url, params={"n": n}, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do, retries=0)
@@ -306,6 +317,7 @@ async def get_agent_logs(
 async def wg_down(
     agent_base_url: str,
     timeout: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Tell agent to bring down the WireGuard interface."""
     url = f"{agent_base_url.rstrip('/')}/wg/down"
@@ -313,7 +325,7 @@ async def wg_down(
 
     async def _do():
         client = _get_client()
-        return await client.post(url, headers=_agent_headers(), timeout=_t)
+        return await client.post(url, headers=_agent_headers(token), timeout=_t)
 
     try:
         r = await _call_with_retry(_do)

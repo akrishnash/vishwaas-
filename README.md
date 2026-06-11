@@ -165,7 +165,7 @@ nano agent_config.json
 File: `controller/backend/.env`
 
 ```env
-# Required: shared secret used for all controller→agent calls
+# Required: fallback shared secret for controller→agent calls (per-node tokens issued on approval)
 VISHWAAS_AGENT_TOKEN=change-me-to-a-random-secret
 
 # JWT signing key for dashboard login tokens (change in production)
@@ -182,9 +182,13 @@ VISHWAAS_ALLOWED_ORIGINS=http://localhost:3000
 VISHWAAS_ADMIN_PASSWORD_HASH=
 
 # VPN address pool assigned to nodes
-VISHWAAS_VPN_NETWORK=10.10.10.0/24
-VISHWAAS_VPN_START=10.10.10.2
-VISHWAAS_VPN_END=10.10.10.254
+VISHWAAS_VPN_NETWORK=10.10.10
+VISHWAAS_VPN_START=2
+VISHWAAS_VPN_END=254
+
+# Optional: path to CA cert PEM used to verify agent HTTPS certs.
+# Leave empty to use system CAs. Set to "false" to disable TLS verification (not recommended).
+VISHWAAS_AGENT_CA_CERT=
 
 # Optional: JSON structured logging
 VISHWAAS_LOG_JSON=false
@@ -203,20 +207,25 @@ File: `agent/agent_config.json`
   "wg_interface": "wg0",
   "listen_port": 51820,
   "keys_dir": "./keys",
-  "use_tpm_wg_key": false
+  "use_tpm_wg_key": false,
+  "tls_cert_file": "",
+  "tls_key_file": ""
 }
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
 | `master_url` | Yes | Controller base URL |
-| `master_token` | Yes | Must match `VISHWAAS_AGENT_TOKEN` on the controller |
+| `master_token` | Yes | Must match `VISHWAAS_AGENT_TOKEN` on the controller (used until per-node token is issued) |
 | `agent_advertise_url` | Yes | URL the controller uses to call back to this agent |
 | `node_name` | No | `"auto"` uses the machine hostname |
 | `wg_interface` | No | WireGuard interface name (default `wg0`) |
 | `listen_port` | No | WireGuard UDP listen port (default `51820`) |
-| `keys_dir` | No | Directory where WireGuard keys + state are stored |
+| `keys_dir` | No | Directory where WireGuard keys, state, and per-node token are stored |
 | `use_tpm_wg_key` | No | Store private key in TPM NV index (requires `tpm2-tools`) |
+| `tls_cert_file` | No | Path to TLS certificate PEM. When set (with `tls_key_file`) the agent serves HTTPS instead of HTTP. Generate: `openssl req -x509 -newkey rsa:4096 -keyout agent-key.pem -out agent-cert.pem -days 3650 -nodes -subj '/CN=vishwaas-agent'` |
+| `tls_key_file` | No | Path to TLS private key PEM for HTTPS |
+| `allowed_controller_ips` | No | Extra controller IPs beyond the one parsed from `master_url`; loopback always allowed |
 
 ---
 
@@ -353,13 +362,16 @@ Agent restarts → sends new join request → admin must re-approve
 
 | Layer | Mechanism |
 |-------|-----------|
-| Dashboard login | JWT tokens (signed with `VISHWAAS_JWT_SECRET`); logout invalidates the token via a revocation blacklist |
-| Controller → Agent calls | `X-VISHWAAS-TOKEN` header; agent rejects calls without a matching token |
+| Dashboard login | JWT tokens (signed with `VISHWAAS_JWT_SECRET`); logout invalidates the token via a revocation blacklist (`jti` blacklist, pruned on startup) |
+| Controller → Agent auth | **Per-node tokens** — on first approval the controller generates a unique `secrets.token_hex(32)` for each node, pushes it via `set-vpn-address`, and uses it for all subsequent calls. Falls back to the shared `VISHWAAS_AGENT_TOKEN` for pre-existing nodes. |
+| Controller → Agent TLS | Optional: set `tls_cert_file` / `tls_key_file` on the agent to serve HTTPS; set `VISHWAAS_AGENT_CA_CERT` on the controller to verify agent certs. Without TLS the management plane is HTTP — acceptable on a trusted LAN, insufficient if the network is untrusted. |
 | Agent → Controller (join) | No token required — public endpoint; rate-limited to 10 requests/minute per IP |
-| Input validation | Node name pattern, WireGuard public key format, agent URL scheme enforced on join |
+| Agent IP allowlist | Agent rejects requests from IPs other than the controller; configurable via `allowed_controller_ips`; `/health` exempt |
+| Controller network policy | nginx restricts all `/api/*` to RFC-1918 private networks + localhost using `allow`/`deny` directives |
+| Input validation | WireGuard base64 public key validated on agent endpoints; Pydantic-typed request bodies throughout; 64 KB / 256 KB body size limits on agent / controller |
 | CORS | Configured via `VISHWAAS_ALLOWED_ORIGINS`; wildcard blocked in production mode |
-| Startup guards | In `VISHWAAS_ENVIRONMENT=production`, the controller refuses to start with default `jwt_secret` or `*` CORS |
-| Private keys | Generated locally on each agent; optionally stored in TPM NV index |
+| Startup guards | In `VISHWAAS_ENVIRONMENT=production`, the controller refuses to start with default `jwt_secret`, missing password hash, `*` CORS, or localhost origins; logs a warning if SQLite is in use |
+| Private keys | Generated locally on each agent; optionally stored in TPM NV index; never logged or returned via API |
 
 ---
 
@@ -410,6 +422,27 @@ If the DB was created before Alembic was added:
 ```bash
 .venv/bin/alembic stamp head
 ```
+
+---
+
+## Production hardening checklist
+
+Before going to production, verify these are done:
+
+| # | Item | How |
+|---|------|-----|
+| 1 | Change `VISHWAAS_JWT_SECRET` from default | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| 2 | Set `VISHWAAS_ADMIN_PASSWORD_HASH` | `python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpass', bcrypt.gensalt()).decode())"` |
+| 3 | Set `VISHWAAS_ENVIRONMENT=production` | Enables all startup guards |
+| 4 | Set `VISHWAAS_ALLOWED_ORIGINS` to your domain | e.g. `https://dashboard.example.com` |
+| 5 | Deploy nginx with TLS | Use the provided `controller/nginx.conf`; get a cert via `certbot` |
+| 6 | Enable agent HTTPS (optional but recommended) | Set `tls_cert_file` / `tls_key_file` in `agent_config.json` and `VISHWAAS_AGENT_CA_CERT` on the controller |
+| 7 | Use PostgreSQL instead of SQLite | `VISHWAAS_DATABASE_URL=postgresql+psycopg2://user:pass@host/dbname` |
+| 8 | Run controller as a dedicated user | Use the provided `vishwaas-controller.service` systemd unit |
+| 9 | Run agent as root (needed for `wg0`) | Use the provided `vishwaas-agent.service` systemd unit |
+| 10 | Back up the database | SQLite: `cp vishwaas_master.db vishwaas_master.db.bak`; Postgres: `pg_dump` |
+
+> **Note:** Per-node tokens are issued automatically on first approval — no manual action needed. The shared `VISHWAAS_AGENT_TOKEN` is only used as a bootstrap fallback for the very first `set-vpn-address` call before the per-node token is delivered.
 
 ---
 

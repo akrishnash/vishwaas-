@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Audit log retention: logs older than this many days are pruned by heartbeat
     log_retention_days: int = 90
 
+    # TLS verification for controller→agent HTTPS calls.
+    # Set to path of CA certificate PEM (e.g. /etc/vishwaas/agent-ca.pem) to verify
+    # self-signed agent certs. Empty = use system CAs. "false" = disable (not recommended).
+    agent_ca_cert: str = ""
+
     class Config:
         env_file = ".env"
         env_prefix = "VISHWAAS_"

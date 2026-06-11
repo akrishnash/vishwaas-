@@ -63,20 +63,20 @@ async def approve_connection(
         # node_a is a spoke; it routes all VPN traffic through hub (node_b)
         allowed_for_a = vpn_subnet  # spoke learns full VPN subnet via hub
         allowed_for_b = None        # hub gets /32 for this spoke (default)
-        await enable_ip_forward(node_b.agent_url)
+        await enable_ip_forward(node_b.agent_url, token=node_b.agent_token)
         logger.info("approve_connection: node_b=%s is gateway hub; spoke allowed_ips=%s", node_b.name, allowed_for_a)
     elif node_a.is_gateway:
         # node_b is a spoke; node_a is hub
         allowed_for_a = None        # hub gets /32 for this spoke
         allowed_for_b = vpn_subnet  # spoke learns full VPN subnet via hub
-        await enable_ip_forward(node_a.agent_url)
+        await enable_ip_forward(node_a.agent_url, token=node_a.agent_token)
         logger.info("approve_connection: node_a=%s is gateway hub; spoke allowed_ips=%s", node_a.name, allowed_for_b)
     else:
         allowed_for_a = None  # default /32
         allowed_for_b = None  # default /32
 
     # Call both agents atomically: if node_b fails, roll back node_a's peer.
-    ok_a = await add_peer(node_a.agent_url, node_b.public_key, node_b.vpn_ip, peer_endpoint=endpoint_b, allowed_ips=allowed_for_a)
+    ok_a = await add_peer(node_a.agent_url, node_b.public_key, node_b.vpn_ip, peer_endpoint=endpoint_b, allowed_ips=allowed_for_a, token=node_a.agent_token)
     if not ok_a:
         logger.error(
             "approve_connection: add_peer to node_a=%s failed — aborting, no connection created",
@@ -84,13 +84,13 @@ async def approve_connection(
         )
         return None
 
-    ok_b = await add_peer(node_b.agent_url, node_a.public_key, node_a.vpn_ip, peer_endpoint=endpoint_a, allowed_ips=allowed_for_b)
+    ok_b = await add_peer(node_b.agent_url, node_a.public_key, node_a.vpn_ip, peer_endpoint=endpoint_a, allowed_ips=allowed_for_b, token=node_b.agent_token)
     if not ok_b:
         logger.error(
             "approve_connection: add_peer to node_b=%s failed — rolling back node_a peer",
             node_b.name,
         )
-        await remove_peer(node_a.agent_url, node_b.public_key)
+        await remove_peer(node_a.agent_url, node_b.public_key, token=node_a.agent_token)
         return None
 
     conn = Connection(
@@ -145,8 +145,8 @@ async def terminate_connection_and_teardown(db: Session, connection_id: int) -> 
         "terminate_connection_and_teardown: remove peers node_a=%s (%s) node_b=%s (%s)",
         node_a.name, node_a.agent_url, node_b.name, node_b.agent_url,
     )
-    await remove_peer(node_a.agent_url, node_b.public_key)
-    await remove_peer(node_b.agent_url, node_a.public_key)
+    await remove_peer(node_a.agent_url, node_b.public_key, token=node_a.agent_token)
+    await remove_peer(node_b.agent_url, node_a.public_key, token=node_b.agent_token)
     conn.status = ConnectionStatus.TERMINATED
     db.flush()
     return True

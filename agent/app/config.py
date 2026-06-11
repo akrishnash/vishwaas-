@@ -64,11 +64,22 @@ def load_config() -> dict[str, Any]:
     return data
 
 
+_config_cache: dict[str, Any] | None = None
+
+
 def get_config() -> dict[str, Any]:
-    """Return cached config or load once. Used at runtime."""
-    if not hasattr(get_config, "_cache"):
-        get_config._cache = load_config()  # type: ignore[attr-defined]
-    return get_config._cache  # type: ignore[attr-defined]
+    """Return cached config; loads on first call. Use reload_config() to re-read from disk."""
+    global _config_cache
+    if _config_cache is None:
+        _config_cache = load_config()
+    return _config_cache
+
+
+def reload_config() -> dict[str, Any]:
+    """Force a re-read of agent_config.json and replace the cache."""
+    global _config_cache
+    _config_cache = load_config()
+    return _config_cache
 
 
 def get_node_name() -> str:
@@ -145,3 +156,61 @@ def get_use_tpm_wg_key() -> bool:
 def get_tpm_nv_index_wg() -> int:
     """TPM NV index used for WireGuard private key (default 1). Must be 0x01-0xFFFFFFFE."""
     return int(get_config().get("tpm_nv_index_wg", 1))
+
+
+def get_allowed_controller_ips() -> list[str]:
+    """
+    IPs allowed to call token-gated agent endpoints.
+    Always includes the IP parsed from master_url.
+    Extend via 'allowed_controller_ips' in agent_config.json (list or comma-separated string).
+    127.0.0.1 / ::1 are always allowed for same-machine deployments.
+    """
+    from urllib.parse import urlparse
+    cfg = get_config()
+    extras = cfg.get("allowed_controller_ips", [])
+    if isinstance(extras, str):
+        extras = [ip.strip() for ip in extras.split(",") if ip.strip()]
+
+    allowed: set[str] = {"127.0.0.1", "::1"}.union(set(extras))
+
+    master_url = get_master_url()
+    if master_url:
+        host = urlparse(master_url).hostname or ""
+        if host:
+            if host in ("localhost",):
+                allowed.update(["127.0.0.1", "::1"])
+            else:
+                allowed.add(host)
+
+    return list(allowed)
+
+
+def get_tls_cert_file() -> str:
+    """Path to TLS certificate PEM for HTTPS agent API. Empty string = HTTP (no TLS)."""
+    return get_config().get("tls_cert_file", "").strip()
+
+
+def get_tls_key_file() -> str:
+    """Path to TLS private key PEM for HTTPS agent API. Empty string = HTTP (no TLS)."""
+    return get_config().get("tls_key_file", "").strip()
+
+
+def get_stored_agent_token_path() -> Path:
+    """Path to the per-agent token file written by the controller on first approval."""
+    return get_keys_dir() / "agent_token.txt"
+
+
+def get_stored_agent_token() -> str:
+    """
+    Return the per-agent token issued by the controller (stored on disk after first approval).
+    Falls back to master_token from config if not yet issued.
+    """
+    path = get_stored_agent_token_path()
+    try:
+        if path.exists():
+            token = path.read_text(encoding="utf-8").strip()
+            if token:
+                return token
+    except Exception:
+        pass
+    return get_master_token()

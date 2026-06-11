@@ -36,6 +36,7 @@ async def _retry_set_vpn_address(
     private_key: str | None,
     node_name: str,
     node_id: int,
+    agent_token: str | None = None,
 ):
     """
     Retry set_vpn_address in background (agent may have been starting up).
@@ -48,7 +49,7 @@ async def _retry_set_vpn_address(
 
     for attempt in range(1, PUSH_RETRY_COUNT + 1):
         await asyncio.sleep(PUSH_RETRY_DELAY)
-        ok = await set_vpn_address(agent_url, vpn_ip, private_key=private_key)
+        ok = await set_vpn_address(agent_url, vpn_ip, private_key=private_key, agent_token=agent_token)
         if ok:
             logger.info("retry_set_vpn_address: success for %s after attempt %s", node_name, attempt)
             db = SessionLocal()
@@ -108,7 +109,7 @@ async def request_join(request: Request, body: RequestJoinBody, db: Session = De
                 peer_id = conn.node_b_id if conn.node_a_id == existing_node.id else conn.node_a_id
                 peer = db.query(Node).filter(Node.id == peer_id).first()
                 if peer and peer.agent_url and existing_node.public_key:
-                    await remove_peer(peer.agent_url, existing_node.public_key)
+                    await remove_peer(peer.agent_url, existing_node.public_key, token=peer.agent_token)
                     logger.info("request-join: removed stale peer %s from node %s", pk_short, peer.name)
 
             # Clean up DB records for this node
@@ -199,8 +200,14 @@ async def approve_join_request(id: int, db: Session = Depends(get_db), current_u
 
     logger.info("approve_join_request: node_id=%s name=%s vpn_ip=%s agent_url=%s", node.id, node.name, node.vpn_ip, node.agent_url)
 
-    # Phase 2 — push to agent; upgrade to ACTIVE only on success
-    ok = await set_vpn_address(node.agent_url, node.vpn_ip, private_key=issued_private_key)
+    # Phase 2 — push to agent; upgrade to ACTIVE only on success.
+    # Pass the per-node token so the agent stores it and uses it from now on.
+    # The initial call must still use the shared agent_token (agent doesn't have its token yet).
+    ok = await set_vpn_address(
+        node.agent_url, node.vpn_ip,
+        private_key=issued_private_key,
+        agent_token=node.agent_token,
+    )
     if ok:
         node.status = NodeStatus.ACTIVE
         db.commit()
@@ -209,7 +216,7 @@ async def approve_join_request(id: int, db: Session = Depends(get_db), current_u
         logger.warning("approve_join_request: set_vpn_address failed, scheduling background retry")
         node_id = node.id
         asyncio.create_task(
-            _retry_set_vpn_address(node.agent_url, node.vpn_ip, issued_private_key, node.name, node_id)
+            _retry_set_vpn_address(node.agent_url, node.vpn_ip, issued_private_key, node.name, node_id, node.agent_token)
         )
     return {"ok": True, "node_id": node.id, "vpn_ip": node.vpn_ip}
 

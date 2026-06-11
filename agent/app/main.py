@@ -13,11 +13,13 @@ import asyncio
 import socket
 import sys
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import wireguard, state
 from app.config import (
@@ -29,6 +31,9 @@ from app.config import (
     get_master_token,
     get_master_url,
     get_node_name,
+    get_stored_agent_token_path,
+    get_tls_cert_file,
+    get_tls_key_file,
 )
 from app.logger import (
     get_logger,
@@ -38,10 +43,62 @@ from app.logger import (
     log_error,
     set_keys_dir_log,
 )
-from app.security import require_master_token, log_unauthorized, get_client_ip
+from app.security import require_master_token, log_unauthorized, get_client_ip, ControllerIPMiddleware
 from app.state import get_state, set_waiting, set_active, set_error
 
 logger = get_logger()
+
+_MAX_BODY_BYTES = 64 * 1024  # 64 KB — no legitimate agent payload exceeds this
+
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            cl = request.headers.get("content-length")
+            if cl and int(cl) > _MAX_BODY_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+        return await call_next(request)
+
+
+class SetVpnAddressBody(BaseModel):
+    vpn_ip: str
+    private_key: Optional[str] = None
+    agent_token: Optional[str] = None
+
+
+class PeerAddBody(BaseModel):
+    public_key: str
+    allowed_ip: Optional[str] = None
+    allowed_ips: Optional[str] = None
+    endpoint: Optional[str] = None
+    persistent_keepalive: int = 25
+
+    @field_validator("public_key")
+    @classmethod
+    def _validate_pubkey(cls, v: str) -> str:
+        import base64
+        v = v.strip()
+        try:
+            decoded = base64.b64decode(v, validate=True)
+            if len(decoded) != 32:
+                raise ValueError
+        except Exception:
+            raise ValueError("public_key must be a 32-byte base64-encoded WireGuard public key")
+        return v
+
+
+class PeerRemoveBody(BaseModel):
+    public_key: str
+
+
+class WgAddPeerBody(BaseModel):
+    public_key: str
+    allowed_ips: str
+    endpoint: Optional[str] = None
+
+
+class WgRemovePeerBody(BaseModel):
+    public_key: str
 
 # Retry interval when MASTER is unreachable (seconds)
 JOIN_RETRY_INTERVAL = 10
@@ -224,6 +281,8 @@ app = FastAPI(
     description="WireGuard node agent; MASTER-controlled.",
     lifespan=lifespan,
 )
+app.add_middleware(ControllerIPMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 # ---- Health (no auth for readiness probes; optional: restrict in firewall)
@@ -259,19 +318,19 @@ def health() -> dict[str, Any]:
 
 # ---- Controller assigns VPN IP (provision_node: ensure wg0 exists and is up, idempotent)
 @app.post("/set-vpn-address", dependencies=[Depends(require_master_token)])
-def set_vpn_address(body: dict[str, Any]) -> dict[str, Any]:
+def set_vpn_address(body: SetVpnAddressBody) -> dict[str, Any]:
     """
     Provision node: ensure wg0 exists and is up with the assigned VPN IP.
     If wg0 already exists: do NOT recreate it, do NOT regenerate private key; verify IP, ensure up.
     If wg0 does not exist: create interface, set private key, assign IP, bring up.
     """
     global _join_decided
-    vpn_ip = body.get("vpn_ip")
-    if not vpn_ip or not isinstance(vpn_ip, str):
-        logger.warning("set-vpn-address rejected: vpn_ip missing or invalid")
+    vpn_ip = body.vpn_ip.strip()
+    if not vpn_ip:
+        logger.warning("set-vpn-address rejected: vpn_ip empty")
         raise HTTPException(status_code=400, detail="vpn_ip required")
-    vpn_ip = vpn_ip.strip()
-    private_key = body.get("private_key")
+    private_key = body.private_key
+    agent_token = body.agent_token
     if private_key and isinstance(private_key, str):
         logger.info("set-vpn-address: received vpn_ip=%s and controller-issued private key", vpn_ip)
         try:
@@ -281,6 +340,15 @@ def set_vpn_address(body: dict[str, Any]) -> dict[str, Any]:
             return {"success": False, "message": str(e), "detail": None}
     else:
         logger.info("set-vpn-address: received vpn_ip=%s", vpn_ip)
+    if agent_token and isinstance(agent_token, str) and agent_token.strip():
+        try:
+            token_path = get_stored_agent_token_path()
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(agent_token.strip(), encoding="utf-8")
+            token_path.chmod(0o600)
+            logger.info("set-vpn-address: stored per-agent token")
+        except Exception as e:
+            log_error("set-vpn-address: storing per-agent token failed", e)
     result = wireguard.provision_interface(vpn_ip)
     if result.get("success"):
         # Controller has approved and pushed VPN config — stop the join loop
@@ -316,24 +384,20 @@ def wg_stop() -> dict[str, Any]:
 
 
 @app.post("/wg/add-peer", dependencies=[Depends(require_master_token)])
-def wg_add_peer(body: dict[str, Any]) -> dict[str, Any]:
+def wg_add_peer(body: WgAddPeerBody) -> dict[str, Any]:
     """Add peer. Body: public_key, allowed_ips, endpoint (optional)."""
-    pk = body.get("public_key")
-    allowed = body.get("allowed_ips")
-    if not pk or not allowed:
-        raise HTTPException(status_code=400, detail="public_key and allowed_ips required")
+    pk = body.public_key
+    allowed = body.allowed_ips
     logger.info("Command: /wg/add-peer allowed_ips=%s peer_key=%s...", allowed, (pk[:12] + "..." if len(pk) > 12 else pk))
-    result = wireguard.wg_add_peer(pk, allowed, body.get("endpoint"))
+    result = wireguard.wg_add_peer(pk, allowed, body.endpoint)
     log_command("/wg/add-peer", result.get("success", False), result.get("detail", ""))
     return result
 
 
 @app.post("/wg/remove-peer", dependencies=[Depends(require_master_token)])
-def wg_remove_peer(body: dict[str, Any]) -> dict[str, Any]:
+def wg_remove_peer(body: WgRemovePeerBody) -> dict[str, Any]:
     """Remove peer. Body: public_key."""
-    pk = body.get("public_key")
-    if not pk:
-        raise HTTPException(status_code=400, detail="public_key required")
+    pk = body.public_key
     logger.info("Command: /wg/remove-peer peer_key=%s...", (pk[:12] + "..." if len(pk) > 12 else pk))
     result = wireguard.wg_remove_peer(pk)
     log_command("/wg/remove-peer", result.get("success", False), result.get("detail", ""))
@@ -357,23 +421,21 @@ def wg_down() -> dict[str, Any]:
 # ---- Controller-compatible API (same semantics as backend agent_client)
 # POST /peer (add), DELETE /peer (remove). Do not restart interface for peer changes.
 @app.post("/peer", dependencies=[Depends(require_master_token)])
-def peer_add(body: dict[str, Any]) -> dict[str, Any]:
+def peer_add(body: PeerAddBody) -> dict[str, Any]:
     """
     Add or update peer. Interface must already exist (provisioned via set-vpn-address).
     Does not call wg_up. Uses persistent-keepalive 25. Idempotent: if peer exists, updates it.
     """
-    pk = body.get("public_key")
-    allowed = body.get("allowed_ips") or body.get("allowed_ip")
-    if not pk or not allowed:
-        raise HTTPException(status_code=400, detail="public_key and allowed_ip (or allowed_ips) required")
+    pk = body.public_key
+    allowed = (body.allowed_ips or body.allowed_ip or "").strip()
+    if not allowed:
+        raise HTTPException(status_code=400, detail="allowed_ip or allowed_ips required")
     if "/" not in allowed:
         allowed = f"{allowed}/32"
-    endpoint = body.get("endpoint")
-    keepalive = body.get("persistent_keepalive", 25)
     if not wireguard.interface_exists():
         logger.warning("POST /peer: interface does not exist")
         return {"success": False, "message": "Interface not provisioned; approve join first", "detail": None}
-    result = wireguard.wg_add_peer(pk, allowed, endpoint=endpoint, persistent_keepalive=keepalive)
+    result = wireguard.wg_add_peer(pk, allowed, endpoint=body.endpoint, persistent_keepalive=body.persistent_keepalive)
     log_command("/peer (add)", result.get("success", False), result.get("detail", ""))
     if result.get("success"):
         state.set_active()
@@ -381,11 +443,9 @@ def peer_add(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.delete("/peer", dependencies=[Depends(require_master_token)])
-def peer_remove(body: dict[str, Any]) -> dict[str, Any]:
+def peer_remove(body: PeerRemoveBody) -> dict[str, Any]:
     """Remove peer. Idempotent: if peer not present, return success. Interface stays up."""
-    pk = body.get("public_key")
-    if not pk:
-        raise HTTPException(status_code=400, detail="public_key required")
+    pk = body.public_key
     logger.info("Command: DELETE /peer peer_key=%s...", (pk[:12] + "..." if len(pk) > 12 else pk))
     result = wireguard.wg_remove_peer(pk)
     log_command("/peer (delete)", result.get("success", False), result.get("detail", ""))
@@ -414,7 +474,7 @@ def ip_forward_enable() -> dict[str, Any]:
 
 
 @app.post("/remove-node", dependencies=[Depends(require_master_token)])
-def remove_node() -> dict[str, Any]:
+def remove_node_endpoint() -> dict[str, Any]:
     """
     Remove this node: remove all peers, delete wg0 interface, clean vpn_ip file.
     Does not regenerate or delete private key.
@@ -464,13 +524,19 @@ def run():
     """Entry point for uvicorn (systemd)."""
     host = get_agent_bind_host()
     port = get_agent_port()
-    uvicorn.run(
-        "app.main:app",
-        host=host,
-        port=port,
-        log_config=None,
-        access_log=True,
-    )
+    cert = get_tls_cert_file()
+    key = get_tls_key_file()
+    kwargs: dict = {
+        "host": host,
+        "port": port,
+        "log_config": None,
+        "access_log": True,
+    }
+    if cert and key:
+        kwargs["ssl_certfile"] = cert
+        kwargs["ssl_keyfile"] = key
+        logger.info("Agent TLS enabled: cert=%s", cert)
+    uvicorn.run("app.main:app", **kwargs)
 
 
 if __name__ == "__main__":

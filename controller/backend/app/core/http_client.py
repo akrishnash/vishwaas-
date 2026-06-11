@@ -17,9 +17,21 @@ _client: httpx.AsyncClient | None = None
 async def init_client() -> None:
     """Create the shared client. Called from lifespan startup."""
     global _client
+    from app.core.config import settings
+    ca = settings.agent_ca_cert.strip()
+    if ca.lower() == "false":
+        verify: bool | str = False
+        logger.warning("TLS verification for agent calls is DISABLED (VISHWAAS_AGENT_CA_CERT=false)")
+    elif ca:
+        verify = ca
+        logger.info("TLS verification for agent calls using CA cert: %s", ca)
+    else:
+        verify = True  # system CAs
+
     _client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         timeout=10.0,
+        verify=verify,
     )
     logger.debug("Shared httpx client initialized")
 

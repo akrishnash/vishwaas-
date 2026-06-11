@@ -3,6 +3,7 @@ Join flow: request -> approve/reject.
 On approve: assign next free VPN IP, insert node, push config to agent.
 Optional: when agent sent no public_key, controller generates keypair and pushes private_key to agent.
 """
+import secrets
 import subprocess
 from sqlalchemy.orm import Session
 
@@ -117,6 +118,9 @@ def approve_join_with_issued_key(
     else:
         public_key = jr.public_key.strip()
 
+    # Unique token for this node; controller uses it for all subsequent calls to this agent.
+    per_agent_token = secrets.token_hex(32)
+
     # Status starts as APPROVED; caller upgrades to ACTIVE after agent confirms receipt.
     node = Node(
         name=jr.node_name,
@@ -124,6 +128,7 @@ def approve_join_with_issued_key(
         agent_url=jr.agent_url,
         vpn_ip=vpn_ip,
         status=NodeStatus.APPROVED,
+        agent_token=per_agent_token,
     )
     db.add(node)
     db.flush()

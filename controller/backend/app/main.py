@@ -37,6 +37,15 @@ def _validate_controller_config() -> None:
             "VISHWAAS_AGENT_TOKEN is not set. Please set it in .env (same value as each agent's master_token) "
             "so the controller can push config and peers to agents. Without it, approve/connection flows will not work."
         )
+    if "sqlite" in settings.database_url.lower() and settings.environment == "production":
+        logger.warning(
+            "SQLite is configured as the database in production (VISHWAAS_DATABASE_URL=%s). "
+            "SQLite does not support concurrent writes and has no HA capability. "
+            "For production deployments with more than a handful of nodes, switch to PostgreSQL: "
+            "set VISHWAAS_DATABASE_URL=postgresql+psycopg2://user:pass@host/dbname in .env.",
+            settings.database_url,
+        )
+
     if settings.environment == "production":
         if settings.jwt_secret == "change-me-in-production":
             logger.critical(
@@ -70,6 +79,21 @@ def _validate_controller_config() -> None:
                 ", ".join(_localhost_origins),
             )
             sys.exit(1)
+
+
+_MAX_BODY_BYTES = 256 * 1024  # 256 KB
+
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject requests whose Content-Length exceeds a safe maximum."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            cl = request.headers.get("content-length")
+            if cl and int(cl) > _MAX_BODY_BYTES:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+        return await call_next(request)
 
 
 class CorrelationMiddleware(BaseHTTPMiddleware):
@@ -156,6 +180,7 @@ app.add_middleware(
 )
 app.add_middleware(CorrelationMiddleware)
 app.add_middleware(PrometheusMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

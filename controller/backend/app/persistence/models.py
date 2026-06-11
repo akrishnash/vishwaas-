@@ -34,6 +34,9 @@ class Node(Base):
     is_gateway = Column(Integer, nullable=False, default=0)  # 1 = hub node, routes for all spokes
     last_seen = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    # Per-node secret token pushed to agent on first approval; used for all subsequent calls.
+    # Falls back to VISHWAAS_AGENT_TOKEN (shared) if None (pre-migration nodes).
+    agent_token = Column(String(128), nullable=True)
 
     # Relationships for connection requests and connections
     connection_requests_from = relationship(
