@@ -1,0 +1,21 @@
+{
+  "node_name": "auto",
+  "master_url": "http://CONTROLLER_IP:8000",
+  "master_token": "YOUR_SHARED_TOKEN_SAME_AS_CONTROLLER_VISHWAAS_AGENT_TOKEN",
+  "agent_advertise_url": "http://THIS_MACHINE_IP:9000",
+  "wg_interface": "wg0",
+  "listen_port": 51820,
+  "subnet": "10.10.10.0/24",
+  "keys_dir": "./keys",
+  "agent_bind_host": "0.0.0.0",
+  "agent_port": 9000,
+  "use_tpm_wg_key": false,
+  "tpm_nv_index_wg": 1,
+  "allowed_controller_ips": [],
+
+  "_tls_comment": "Optional: serve the agent API over HTTPS instead of HTTP.",
+  "_tls_comment2": "Generate self-signed cert: openssl req -x509 -newkey rsa:4096 -keyout agent-key.pem -out agent-cert.pem -days 3650 -nodes -subj '/CN=vishwaas-agent'",
+  "_tls_comment3": "Set agent_advertise_url to https://THIS_MACHINE_IP:9000 and distribute agent-cert.pem to the controller as VISHWAAS_AGENT_CA_CERT.",
+  "tls_cert_file": "",
+  "tls_key_file": ""
+}

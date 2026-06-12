@@ -1,0 +1,27 @@
+# VISHWAAS Node Agent - systemd unit
+# Installed by install.sh to /etc/systemd/system/
+# Runs as root so it can create/configure the WireGuard interface (ip link, wg set).
+
+[Unit]
+Description=VISHWAAS Node Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root required to create wg0 and run ip/wg commands
+User=root
+Group=root
+WorkingDirectory=/opt/vishwaas-agent
+# Host/port read from agent_config.json via app.main.run()
+ExecStart=/opt/vishwaas-agent/venv/bin/python -c "from app.main import run; run()"
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# Log to journal and /var/log/vishwaas-agent.log (handled by app)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

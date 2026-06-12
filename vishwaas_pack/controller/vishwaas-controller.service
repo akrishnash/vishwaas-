@@ -1,0 +1,43 @@
+[Unit]
+Description=VISHWAAS Controller (FastAPI backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as a dedicated non-root user for least privilege.
+# Create with: sudo useradd -r -s /bin/false vishwaas
+User=vishwaas
+Group=vishwaas
+
+WorkingDirectory=/opt/vishwaas/controller/backend
+
+# Load environment variables from .env (set VISHWAAS_JWT_SECRET, VISHWAAS_AGENT_TOKEN, etc.)
+EnvironmentFile=/opt/vishwaas/controller/backend/.env
+Environment=PYTHONUNBUFFERED=1
+
+# Bind to localhost only — nginx handles TLS and public access.
+ExecStart=/opt/vishwaas/controller/backend/.venv/bin/python \
+    -m uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --log-config none
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Forward stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vishwaas-controller
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

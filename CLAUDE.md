@@ -158,6 +158,33 @@ Below is every meaningful change made.
 - `controller/start_controller.sh` — dev/prod launcher
 - `controller/backend/.env.example` — documented config template
 
+### Agent — Security: API Not Exposed to Public
+
+**`app/security.py`**
+- Added `ControllerIPMiddleware` — FastAPI `BaseHTTPMiddleware` that checks the source IP of
+  every incoming request against the controller's IP (extracted from `master_url` in config).
+  Only `/health` is exempt (needed for external monitoring). All other endpoints return HTTP 403
+  if the source IP is not in the allowed list.
+- `allowed_controller_ips` config key in `agent_config.json` — optional list to add extra
+  controller IPs beyond the one parsed from `master_url`. `127.0.0.1` and `::1` are always
+  allowed (same-machine deployments).
+
+**`app/config.py`**
+- Added `get_allowed_controller_ips()` — parses the controller IP from `master_url`, merges
+  with optional `allowed_controller_ips` config list, always includes loopback.
+
+**`app/main.py`**
+- Registers `ControllerIPMiddleware` on app startup.
+
+**`controller/nginx.conf`**
+- Added `geo $private_network` block — classifies RFC-1918 private addresses + loopback as
+  private; public-internet IPs get `$private_network = 0`.
+- All `/api/*` management endpoints now return HTTP 403 for any IP where `$private_network = 0`.
+  This prevents the controller REST API from being reachable from the public internet.
+- `/api/health` and `/api/ready` remain fully public (load balancer / uptime probes).
+- `/api/request-join` and `/api/auth/login` are also restricted to private networks (agents
+  and admins must be on the same LAN as the controller).
+
 ### Agent — What Was Changed
 
 **`app/state.py`**
