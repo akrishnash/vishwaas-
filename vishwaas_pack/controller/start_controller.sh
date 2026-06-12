@@ -1,79 +1,30 @@
 #!/usr/bin/env bash
-# VISHWAAS Controller start script.
-#
-# Usage:
-#   ./start_controller.sh           — development mode (0.0.0.0, reload, Vite dev server)
-#   ./start_controller.sh --prod    — production mode (127.0.0.1, no reload, built frontend)
-#
-# Production prerequisites:
-#   - Set VISHWAAS_ENVIRONMENT=production in backend/.env
-#   - Set VISHWAAS_JWT_SECRET to a random secret in backend/.env
-#   - Set VISHWAAS_ALLOWED_ORIGINS to your dashboard URL in backend/.env
-#   - nginx handles TLS and proxies /api/ to 127.0.0.1:8000 (see nginx.conf)
+# VISHWAAS Controller — start script.
+# Run setup.sh first if this is a fresh install.
+# Usage: ./start_controller.sh
 set -e
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND="$ROOT/backend"
-FRONTEND="$ROOT/frontend"
-LOGS="$ROOT/logs"
+CONTROLLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND="$CONTROLLER_DIR/backend"
+VENV="$BACKEND/.venv"
+LOGS="$CONTROLLER_DIR/logs"
 mkdir -p "$LOGS"
 
-PROD=false
-if [[ "${1:-}" == "--prod" ]]; then
-  PROD=true
-fi
+# Validate venv
+[[ -x "$VENV/bin/python" ]] || { echo "ERROR: venv not found at $VENV. Run setup.sh first."; exit 1; }
+"$VENV/bin/python" -c "import uvicorn" 2>/dev/null || { echo "ERROR: uvicorn missing. Re-run setup.sh."; exit 1; }
 
-# Backend — locate venv created by install.sh
+# Validate .env
+[[ -f "$BACKEND/.env" ]] || { echo "ERROR: $BACKEND/.env not found. Run setup.sh first."; exit 1; }
+
+echo "Starting VISHWAAS Controller..."
+echo "  API:       http://0.0.0.0:8000"
+echo "  Dashboard: http://$(hostname -I | awk '{print $1}')/"
+echo "  Logs:      $LOGS/backend.log"
+echo "  Ctrl+C to stop."
+echo ""
+
 cd "$BACKEND"
-if [[ -d "/opt/vishwaas/controller/backend/.venv" ]]; then
-  VENV="/opt/vishwaas/controller/backend/.venv"
-elif [[ -d "$BACKEND/.venv" ]]; then
-  VENV="$BACKEND/.venv"
-else
-  echo "ERROR: venv not found. Run install.sh first."
-  exit 1
-fi
-
-# Validate uvicorn is installed
-if ! "$VENV/bin/python" -c "import uvicorn" 2>/dev/null; then
-  echo "ERROR: uvicorn not found in venv ($VENV). Re-run install.sh."
-  exit 1
-fi
-
-if $PROD; then
-  BIND_HOST="127.0.0.1"
-  RELOAD_FLAG=""
-  echo "Starting controller in PRODUCTION mode (bind=127.0.0.1, no reload)"
-else
-  BIND_HOST="0.0.0.0"
-  RELOAD_FLAG="--reload"
-  echo "Starting controller in DEVELOPMENT mode (bind=0.0.0.0, reload enabled)"
-fi
-
-"$VENV/bin/python" -m uvicorn app.main:app $RELOAD_FLAG --host "$BIND_HOST" --port 8000 --no-access-log \
-  2>&1 | tee "$LOGS/backend.log" &
-BACKEND_PID=$!
-
-# Frontend
-cd "$FRONTEND"
-if $PROD; then
-  # Build and serve via nginx (this script just builds; nginx serves dist/)
-  npm install --silent
-  npm run build
-  echo "Frontend built to $FRONTEND/dist/ — serve with nginx (see controller/nginx.conf)"
-  FRONTEND_PID=""
-else
-  npm install --silent
-  npm run dev 2>&1 | tee "$LOGS/frontend.log" &
-  FRONTEND_PID=$!
-  echo "Frontend: http://localhost:5173  (PID $FRONTEND_PID)"
-fi
-
-echo "Backend:  http://${BIND_HOST}:8000  (PID $BACKEND_PID)"
-echo "Logs: controller/logs/  |  Ctrl+C to stop."
-
-cleanup() {
-  kill "$BACKEND_PID" ${FRONTEND_PID:-} 2>/dev/null || true
-}
-trap cleanup INT TERM
-wait "$BACKEND_PID"
+exec "$VENV/bin/python" -m uvicorn app.main:app \
+    --host 0.0.0.0 --port 8000 --no-access-log \
+    2>&1 | tee "$LOGS/backend.log"

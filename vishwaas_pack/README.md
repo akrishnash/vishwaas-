@@ -1,86 +1,51 @@
-# VISHWAAS — Offline Deployment Package
+# VISHWAAS — Offline Package
 
-Built for: Oracle Linux 10, x86_64, Python 3.12
+Two steps. That's it.
 
-## Quick Start
+---
 
-### 1. Copy this folder to the target machine
-
-```bash
-scp -r vishwaas_pack/ user@target-machine:~/
-# or copy via USB
-```
-
-### 2. On the controller machine (dashboard + API)
+## Step 1 — Setup (run once)
 
 ```bash
-cd vishwaas_pack
-sudo ./install.sh controller
+sudo ./setup.sh controller    # on the admin/dashboard machine
+sudo ./setup.sh agent         # on each VPN node machine
 ```
 
-Then start it:
+This installs Python 3.11, creates the venv, and installs all packages — fully offline.
 
+---
+
+## Step 2 — Run
+
+**Controller:**
 ```bash
 cd /opt/vishwaas/controller
 ./start_controller.sh
 ```
 
-Dashboard is available at `http://<machine-ip>/`
-
-### 3. On each agent/node machine
-
+**Agent** (fill in config first):
 ```bash
-cd vishwaas_pack
-sudo ./install.sh agent
-```
+nano /opt/vishwaas/agent/agent_config.json
+# Set: master_url, master_token, agent_advertise_url
 
-Edit the config, then start:
-
-```bash
-nano /opt/vishwaas/agent/agent_config.json   # fill in master_url and master_token
 cd /opt/vishwaas/agent
 sudo ./start_agent.sh
 ```
 
-The node appears as **Pending** on the dashboard — approve it to bring it onto the VPN.
-
 ---
 
-## What's included
+## What's in the package
 
 ```
 vishwaas_pack/
-├── install.sh                    ← single installer for both controller and agent
-├── README.md                     ← this file
-├── OFFLINE_INSTALL.md            ← detailed manual setup guide
-├── repo/                         ← offline RPMs (python3, python3-pip, nginx,
-│                                    wireguard-tools + all dependencies)
+├── setup.sh                  ← run once per machine
+├── python/                   ← Python 3.11 standalone (no system Python needed)
+├── repo/                     ← nginx + wireguard RPMs
 ├── controller/
-│   ├── backend/                  ← controller API source
-│   ├── frontend/dist/            ← pre-built dashboard (no Node.js needed)
-│   ├── pip_packages/             ← all Python wheels for controller
-│   ├── nginx.conf
-│   └── start_controller.sh
+│   ├── backend/              ← API source + pip_packages/
+│   ├── frontend/dist/        ← pre-built dashboard (no Node.js needed)
+│   └── start_controller.sh  ← just run this
 └── agent/
-    ├── app/                      ← agent source
-    ├── pip_packages/             ← all Python wheels for agent
-    ├── agent_config.json.example
-    ├── requirements.txt
-    └── start_agent.sh
-```
-
-## Useful commands after install
-
-```bash
-# Controller — start
-cd /opt/vishwaas/controller && ./start_controller.sh
-
-# Controller — config
-nano /opt/vishwaas/controller/backend/.env
-
-# Agent — start (requires root for WireGuard)
-cd /opt/vishwaas/agent && sudo ./start_agent.sh
-
-# Agent — config
-nano /opt/vishwaas/agent/agent_config.json
+    ├── app/                  ← agent source + pip_packages/
+    └── start_agent.sh        ← just run this
 ```
