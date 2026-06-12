@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# VISHWAAS — Full offline installer for Oracle Linux 10 (x86_64)
+# VISHWAAS — Full offline installer for Oracle Linux (x86_64)
+# Supports Python 3.9, 3.10, 3.11, 3.12 — auto-detected at runtime
 # Usage:
 #   sudo ./install.sh controller   — set up the controller (admin/dashboard machine)
 #   sudo ./install.sh agent        — set up the agent (VPN node machine)
@@ -17,6 +18,23 @@ info()  { echo -e "${GREEN}[✓]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*"; exit 1; }
 step()  { echo -e "\n${YELLOW}━━ $* ━━${NC}"; }
+
+# ── Detect Python version and pick matching wheels ────────────────────────────
+detect_python() {
+    # Find python3 binary — prefer system python3 over conda/venv
+    PYTHON_BIN=$(command -v python3 2>/dev/null) || error "python3 not found. Install it first: sudo dnf install -y --nogpgcheck $PACK_DIR/repo/*.rpm"
+
+    PY_VERSION=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    PY_SHORT="${PY_VERSION//.}"   # e.g. "39", "310", "311", "312"
+
+    # Map to bundled wheel folder
+    case "$PY_SHORT" in
+        39|310|311|312) WHEEL_SUFFIX="py${PY_SHORT}" ;;
+        *) error "Python $PY_VERSION is not supported. Bundled wheels cover 3.9, 3.10, 3.11, 3.12." ;;
+    esac
+
+    info "Detected Python $PY_VERSION — using pip_packages_${WHEEL_SUFFIX}/"
+}
 
 # ── Root check ────────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && error "Run as root: sudo ./install.sh $MODE"
@@ -90,14 +108,15 @@ if [[ "$MODE" == "controller" ]]; then
     chmod +x "$INSTALL_DIR/start_controller.sh"
 
     # Python venv + offline pip install
+    detect_python
     step "Setting up Python virtual environment (offline)"
     if [[ ! -d "$INSTALL_DIR/backend/.venv" ]]; then
-        python3 -m venv "$INSTALL_DIR/backend/.venv"
+        "$PYTHON_BIN" -m venv "$INSTALL_DIR/backend/.venv"
     fi
     "$INSTALL_DIR/backend/.venv/bin/pip" install --quiet --upgrade pip \
-        --no-index --find-links="$PACK_DIR/controller/pip_packages"
+        --no-index --find-links="$PACK_DIR/controller/pip_packages_${WHEEL_SUFFIX}"
     "$INSTALL_DIR/backend/.venv/bin/pip" install --quiet \
-        --no-index --find-links="$PACK_DIR/controller/pip_packages" \
+        --no-index --find-links="$PACK_DIR/controller/pip_packages_${WHEEL_SUFFIX}" \
         -r "$INSTALL_DIR/backend/requirements.txt"
     info "Python dependencies installed"
 
@@ -187,14 +206,15 @@ if [[ "$MODE" == "agent" ]]; then
     chmod +x "$INSTALL_DIR/start_agent.sh"
 
     # Python venv + offline pip install
+    detect_python
     step "Setting up Python virtual environment (offline)"
     if [[ ! -d "$INSTALL_DIR/venv" ]]; then
-        python3 -m venv "$INSTALL_DIR/venv"
+        "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
     fi
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip \
-        --no-index --find-links="$PACK_DIR/agent/pip_packages"
+        --no-index --find-links="$PACK_DIR/agent/pip_packages_${WHEEL_SUFFIX}"
     "$INSTALL_DIR/venv/bin/pip" install --quiet \
-        --no-index --find-links="$PACK_DIR/agent/pip_packages" \
+        --no-index --find-links="$PACK_DIR/agent/pip_packages_${WHEEL_SUFFIX}" \
         -r "$INSTALL_DIR/requirements.txt"
     info "Python dependencies installed"
 
