@@ -37,3 +37,6 @@ Thumbs.db
 agent/agent_config.json
 agent/keys/
 
+vishwaas_pack/python_standalone/
+vishwaas_pack.tar.gz
+vishwaas-agent-v1.0.tar.gz
