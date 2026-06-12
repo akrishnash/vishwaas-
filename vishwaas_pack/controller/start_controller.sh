@@ -23,12 +23,21 @@ if [[ "${1:-}" == "--prod" ]]; then
   PROD=true
 fi
 
-# Backend
+# Backend — locate venv created by install.sh
 cd "$BACKEND"
-if [[ ! -d ".venv" ]]; then
-  python3 -m venv .venv
-  .venv/bin/pip install --quiet --upgrade pip
-  .venv/bin/pip install --quiet -r requirements.txt
+if [[ -d "/opt/vishwaas/controller/backend/.venv" ]]; then
+  VENV="/opt/vishwaas/controller/backend/.venv"
+elif [[ -d "$BACKEND/.venv" ]]; then
+  VENV="$BACKEND/.venv"
+else
+  echo "ERROR: venv not found. Run install.sh first."
+  exit 1
+fi
+
+# Validate uvicorn is installed
+if ! "$VENV/bin/python" -c "import uvicorn" 2>/dev/null; then
+  echo "ERROR: uvicorn not found in venv ($VENV). Re-run install.sh."
+  exit 1
 fi
 
 if $PROD; then
@@ -41,7 +50,7 @@ else
   echo "Starting controller in DEVELOPMENT mode (bind=0.0.0.0, reload enabled)"
 fi
 
-.venv/bin/python -m uvicorn app.main:app $RELOAD_FLAG --host "$BIND_HOST" --port 8000 --no-access-log \
+"$VENV/bin/python" -m uvicorn app.main:app $RELOAD_FLAG --host "$BIND_HOST" --port 8000 --no-access-log \
   2>&1 | tee "$LOGS/backend.log" &
 BACKEND_PID=$!
 

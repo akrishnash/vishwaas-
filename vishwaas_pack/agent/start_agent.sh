@@ -1,19 +1,40 @@
 #!/usr/bin/env bash
 # VISHWAAS Agent - start script.
 # Self-contained: works from any directory this agent folder is placed on any machine.
-# Usage: sudo ./.start_agent
+# Usage: sudo ./start_agent.sh
 set -e
 
 AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$AGENT_DIR"
 
 if [[ $EUID -ne 0 ]]; then
-  echo "ERROR: Run as root: sudo ./.start_agent"
+  echo "ERROR: Run as root: sudo ./start_agent.sh"
+  exit 1
+fi
+
+# Locate venv — install.sh puts it here; fall back to local ./venv
+if [[ -d "/opt/vishwaas/agent/venv" ]]; then
+  VENV="/opt/vishwaas/agent/venv"
+elif [[ -d "$AGENT_DIR/venv" ]]; then
+  VENV="$AGENT_DIR/venv"
+else
+  echo "ERROR: venv not found. Run install.sh first or create it manually:"
+  echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
+  exit 1
+fi
+
+PYTHON="$VENV/bin/python"
+PIP="$VENV/bin/pip"
+
+# Validate uvicorn is actually installed in the venv
+if ! "$PYTHON" -c "import uvicorn" 2>/dev/null; then
+  echo "ERROR: uvicorn not found in venv ($VENV)."
+  echo "Re-run install.sh or manually: $PIP install -r requirements.txt"
   exit 1
 fi
 
 # Validate agent_config.json
-python3 - <<'EOF'
+"$PYTHON" - <<'EOF'
 import json, sys
 from pathlib import Path
 
@@ -40,18 +61,10 @@ except json.JSONDecodeError as e:
     sys.exit(1)
 EOF
 
-# Setup venv
-if [[ ! -d "venv" ]]; then
-  echo "Setting up Python venv..."
-  python3 -m venv venv
-  venv/bin/pip install --quiet --upgrade pip
-  venv/bin/pip install --quiet -r requirements.txt
-fi
-
 # Ensure keys dir exists
-KEYS_DIR="$(python3 -c "import json; c=json.load(open('agent_config.json')); print(c.get('keys_dir','./keys'))" 2>/dev/null || echo "./keys")"
+KEYS_DIR="$("$PYTHON" -c "import json; c=json.load(open('agent_config.json')); print(c.get('keys_dir','./keys'))" 2>/dev/null || echo "./keys")"
 mkdir -p "$KEYS_DIR"
 chmod 700 "$KEYS_DIR"
 
-echo "Starting VISHWAAS agent on :9000"
-exec venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 9000
+echo "Starting VISHWAAS agent (venv: $VENV) on :9000"
+exec "$PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 9000
