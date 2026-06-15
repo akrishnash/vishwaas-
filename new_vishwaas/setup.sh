@@ -65,7 +65,7 @@ if [[ "$MODE" == "controller" ]]; then
 
     rsync -a --delete \
         --exclude='__pycache__' --exclude='*.pyc' \
-        --exclude='*.db' --exclude='.env' \
+        --exclude='*.db' --exclude='.env' --exclude='.venv' \
         "$PACK_DIR/controller/backend/" "$INSTALL_DIR/backend/"
 
     rsync -a --delete \
@@ -81,7 +81,7 @@ else
 
     rsync -a --delete \
         --exclude='__pycache__' --exclude='*.pyc' \
-        --exclude='keys' --exclude='agent_config.json' \
+        --exclude='keys' --exclude='agent_config.json' --exclude='venv' \
         "$PACK_DIR/agent/" "$INSTALL_DIR/"
 
     chmod +x "$INSTALL_DIR/start_agent.sh"
@@ -98,32 +98,38 @@ else
     VENV="$INSTALL_DIR/venv"
 fi
 
-# The venv was built on the packager's machine; rewrite the embedded paths so
-# Python and scripts resolve correctly under /opt/vishwaas on this machine.
-OLD_PYTHON_PATH=$(grep "^home = " "$VENV/pyvenv.cfg" | sed 's/home = //')
-OLD_VENV_PATH=$(dirname "$OLD_PYTHON_PATH" | sed 's|/vishwaas_pack/python.*||')/vishwaas_pack
+# The venv was built on the packager's machine — rewrite all embedded paths to
+# match where things actually live on this machine.
+OLD_VENV=$(grep "^home = " "$PACK_DIR/$( [[ $MODE == controller ]] && echo controller/backend/.venv || echo agent/venv )/pyvenv.cfg" | sed 's|home = ||' | sed 's|/bin$||')
+# OLD_VENV is the absolute venv path on the packager's machine e.g. /home/foo/new_vishwaas/controller/backend/.venv
 
-if [[ "$OLD_VENV_PATH" != "$PACK_DIR" ]]; then
-    # Rewrite shebang lines in all venv bin scripts
-    find "$VENV/bin" -type f | while read -r f; do
-        if file "$f" 2>/dev/null | grep -q "text"; then
-            sed -i "s|$OLD_VENV_PATH|$PACK_DIR|g" "$f" 2>/dev/null || true
-        fi
-    done
-    # Rewrite pyvenv.cfg
-    sed -i "s|$OLD_VENV_PATH|$PACK_DIR|g" "$VENV/pyvenv.cfg"
+if [[ "$MODE" == "controller" ]]; then
+    SRC_VENV="$PACK_DIR/controller/backend/.venv"
+    DST_VENV="$INSTALL_DIR/backend/.venv"
+else
+    SRC_VENV="$PACK_DIR/agent/venv"
+    DST_VENV="$INSTALL_DIR/venv"
 fi
 
-# Rewrite venv's self-references to its final installed path
-VENV_SCRIPTS=($(find "$VENV/bin" -type f))
-for f in "${VENV_SCRIPTS[@]}"; do
+# Copy the pre-built venv to its install location
+cp -a "$SRC_VENV" "$DST_VENV"
+
+# Replace every occurrence of the old build-time path with the new install path
+# in all text files inside venv/bin and in pyvenv.cfg
+find "$DST_VENV/bin" -type f | while read -r f; do
     if file "$f" 2>/dev/null | grep -q "text"; then
-        sed -i "s|$PACK_DIR/controller/backend/.venv|$INSTALL_DIR/backend/.venv|g" "$f" 2>/dev/null || true
-        sed -i "s|$PACK_DIR/agent/venv|$INSTALL_DIR/venv|g" "$f" 2>/dev/null || true
+        sed -i "s|$SRC_VENV|$DST_VENV|g" "$f" 2>/dev/null || true
+        # Also fix python install path if packager path differs from this machine's pack dir
+        sed -i "s|$OLD_VENV|$DST_VENV|g" "$f" 2>/dev/null || true
     fi
 done
-sed -i "s|$PACK_DIR/controller/backend/.venv|$INSTALL_DIR/backend/.venv|g" "$VENV/pyvenv.cfg" 2>/dev/null || true
-sed -i "s|$PACK_DIR/agent/venv|$INSTALL_DIR/venv|g" "$VENV/pyvenv.cfg" 2>/dev/null || true
+sed -i "s|$SRC_VENV|$DST_VENV|g" "$DST_VENV/pyvenv.cfg"
+sed -i "s|$OLD_VENV|$DST_VENV|g" "$DST_VENV/pyvenv.cfg"
+
+# Fix the python home path (points to bundled python, not the venv itself)
+OLD_PYTHON_HOME=$(grep "^home = " "$DST_VENV/pyvenv.cfg" | sed 's/home = //')
+NEW_PYTHON_HOME="$PYTHON_DIR/bin"
+sed -i "s|$OLD_PYTHON_HOME|$NEW_PYTHON_HOME|g" "$DST_VENV/pyvenv.cfg"
 
 "$VENV/bin/python" -c "import uvicorn" || error "uvicorn not found in pre-built venv — package may be corrupted"
 info "Python environment ready (pre-built, no pip needed)"
