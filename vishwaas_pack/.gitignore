@@ -1,0 +1,14 @@
+# Allow pre-built venvs in this directory — overrides root .gitignore
+!controller/backend/.venv/
+!controller/backend/.venv/**
+!agent/venv/
+!agent/venv/**
+
+# Still exclude heavy compiled cache inside venvs
+controller/backend/.venv/**/__pycache__/
+agent/venv/**/__pycache__/
+controller/backend/.venv/**/*.pyc
+agent/venv/**/*.pyc
+
+# Exclude the tarball itself
+../vishwaas_pack.tar.gz

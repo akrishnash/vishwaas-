@@ -64,7 +64,7 @@ if [[ "$MODE" == "controller" ]]; then
     mkdir -p "$INSTALL_DIR/logs"
 
     rsync -a --delete \
-        --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' \
+        --exclude='__pycache__' --exclude='*.pyc' \
         --exclude='*.db' --exclude='.env' \
         "$PACK_DIR/controller/backend/" "$INSTALL_DIR/backend/"
 
@@ -80,7 +80,7 @@ else
     mkdir -p "$INSTALL_DIR"
 
     rsync -a --delete \
-        --exclude='__pycache__' --exclude='*.pyc' --exclude='venv' \
+        --exclude='__pycache__' --exclude='*.pyc' \
         --exclude='keys' --exclude='agent_config.json' \
         "$PACK_DIR/agent/" "$INSTALL_DIR/"
 
@@ -89,26 +89,44 @@ fi
 
 info "Code installed to $INSTALL_DIR"
 
-# ── 4. Create venv and install Python packages ────────────────────────────────
-step "Creating Python virtual environment and installing packages"
+# ── 4. Copy pre-built venv and fix paths ─────────────────────────────────────
+step "Installing Python environment (pre-built — no pip needed)"
 
 if [[ "$MODE" == "controller" ]]; then
     VENV="$INSTALL_DIR/backend/.venv"
-    WHEELS="$PACK_DIR/controller/pip_packages"
-    REQS="$INSTALL_DIR/backend/requirements.txt"
 else
     VENV="$INSTALL_DIR/venv"
-    WHEELS="$PACK_DIR/agent/pip_packages"
-    REQS="$INSTALL_DIR/requirements.txt"
 fi
 
-"$PYTHON" -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --upgrade pip --no-index --find-links="$WHEELS"
-"$VENV/bin/pip" install --quiet --no-index --find-links="$WHEELS" -r "$REQS"
+# The venv was built on the packager's machine; rewrite the embedded paths so
+# Python and scripts resolve correctly under /opt/vishwaas on this machine.
+OLD_PYTHON_PATH=$(grep "^home = " "$VENV/pyvenv.cfg" | sed 's/home = //')
+OLD_VENV_PATH=$(dirname "$OLD_PYTHON_PATH" | sed 's|/vishwaas_pack/python.*||')/vishwaas_pack
 
-# Verify uvicorn is installed
-"$VENV/bin/python" -c "import uvicorn" || error "uvicorn not installed — pip install may have failed"
-info "All Python packages installed (offline)"
+if [[ "$OLD_VENV_PATH" != "$PACK_DIR" ]]; then
+    # Rewrite shebang lines in all venv bin scripts
+    find "$VENV/bin" -type f | while read -r f; do
+        if file "$f" 2>/dev/null | grep -q "text"; then
+            sed -i "s|$OLD_VENV_PATH|$PACK_DIR|g" "$f" 2>/dev/null || true
+        fi
+    done
+    # Rewrite pyvenv.cfg
+    sed -i "s|$OLD_VENV_PATH|$PACK_DIR|g" "$VENV/pyvenv.cfg"
+fi
+
+# Rewrite venv's self-references to its final installed path
+VENV_SCRIPTS=($(find "$VENV/bin" -type f))
+for f in "${VENV_SCRIPTS[@]}"; do
+    if file "$f" 2>/dev/null | grep -q "text"; then
+        sed -i "s|$PACK_DIR/controller/backend/.venv|$INSTALL_DIR/backend/.venv|g" "$f" 2>/dev/null || true
+        sed -i "s|$PACK_DIR/agent/venv|$INSTALL_DIR/venv|g" "$f" 2>/dev/null || true
+    fi
+done
+sed -i "s|$PACK_DIR/controller/backend/.venv|$INSTALL_DIR/backend/.venv|g" "$VENV/pyvenv.cfg" 2>/dev/null || true
+sed -i "s|$PACK_DIR/agent/venv|$INSTALL_DIR/venv|g" "$VENV/pyvenv.cfg" 2>/dev/null || true
+
+"$VENV/bin/python" -c "import uvicorn" || error "uvicorn not found in pre-built venv — package may be corrupted"
+info "Python environment ready (pre-built, no pip needed)"
 
 # ── 5. Controller: generate .env + configure nginx ───────────────────────────
 if [[ "$MODE" == "controller" ]]; then
